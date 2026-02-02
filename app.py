@@ -7,13 +7,15 @@ from typing import Dict, List, Tuple, Optional
 # 기본 설정
 # -----------------------------
 st.set_page_config(
-    page_title="🎭 심리테스트 기반 영화 추천 (TMDB)",
+    page_title="🎭 심리테스트 기반 영화 추천 (TMDB + Unsplash + ZenQuotes)",
     page_icon="🎬",
     layout="wide",
 )
 
 TMDB_BASE = "https://api.themoviedb.org/3"
 TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w500"
+UNSPLASH_BASE = "https://api.unsplash.com"
+ZENQUOTES_URL = "https://zenquotes.io/api/today"
 
 GENRE_IDS = {
     "액션": 28,
@@ -22,6 +24,16 @@ GENRE_IDS = {
     "SF": 878,
     "로맨스": 10749,
     "판타지": 14,
+}
+
+# 분위기 이미지 검색어(장르 -> Unsplash query)
+UNSPLASH_QUERY_BY_GENRE = {
+    "액션": "action movie cinematic",
+    "코미디": "funny happy colorful",
+    "드라마": "moody film still portrait",
+    "SF": "sci fi futuristic neon",
+    "로맨스": "romantic couple sunset",
+    "판타지": "fantasy magical forest",
 }
 
 # -----------------------------
@@ -103,21 +115,23 @@ QUESTIONS = [
     },
 ]
 
-
 # -----------------------------
-# TMDB 호출 유틸
+# 네트워크 유틸
 # -----------------------------
-def _safe_get_json(url: str, params: Dict) -> Tuple[Optional[Dict], Optional[str]]:
+def safe_get_json(url: str, params: Optional[Dict] = None, headers: Optional[Dict] = None) -> Tuple[Optional[Dict], Optional[str]]:
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(url, params=params, headers=headers, timeout=12)
         r.raise_for_status()
         return r.json(), None
     except requests.RequestException as e:
         return None, str(e)
 
 
-@st.cache_data(ttl=60 * 30)  # 30분 캐시
-def fetch_popular_movies_by_genre(api_key: str, genre_id: int, n: int = 5) -> Tuple[List[Dict], Optional[str]]:
+# -----------------------------
+# TMDB
+# -----------------------------
+@st.cache_data(ttl=60 * 30)
+def fetch_movies_tmbd_by_genre(api_key: str, genre_id: int, n: int = 3) -> Tuple[List[Dict], Optional[str]]:
     url = f"{TMDB_BASE}/discover/movie"
     params = {
         "api_key": api_key,
@@ -128,112 +142,128 @@ def fetch_popular_movies_by_genre(api_key: str, genre_id: int, n: int = 5) -> Tu
         "include_video": "false",
         "page": 1,
     }
-    data, err = _safe_get_json(url, params)
+    data, err = safe_get_json(url, params=params)
     if err:
         return [], err
-
     if not isinstance(data, dict) or "results" not in data:
-        return [], "TMDB 응답 형식이 예상과 달라요. API Key와 호출 제한을 확인해주세요."
-
+        return [], "TMDB 응답 형식이 예상과 달라요. API Key/호출 제한을 확인해주세요."
     results = data.get("results") or []
     return results[:n], None
+
+
+# -----------------------------
+# Unsplash
+# -----------------------------
+@st.cache_data(ttl=60 * 30)
+def fetch_unsplash_image(access_key: str, query: str) -> Tuple[Optional[Dict], Optional[str]]:
+    url = f"{UNSPLASH_BASE}/search/photos"
+    params = {
+        "query": query,
+        "client_id": access_key,
+        "per_page": 1,
+        "orientation": "landscape",
+    }
+    data, err = safe_get_json(url, params=params)
+    if err:
+        return None, err
+    if not isinstance(data, dict) or "results" not in data:
+        return None, "Unsplash 응답 형식이 예상과 달라요."
+    results = data.get("results") or []
+    if not results:
+        return None, None
+    return results[0], None
+
+
+# -----------------------------
+# ZenQuotes
+# -----------------------------
+@st.cache_data(ttl=60 * 60)
+def fetch_zenquote_today() -> Tuple[Optional[Dict], Optional[str]]:
+    data, err = safe_get_json(ZENQUOTES_URL)
+    if err:
+        return None, err
+    # ZenQuotes는 보통 리스트로 내려옴: [{"q":"...", "a":"..."}]
+    if isinstance(data, list) and data:
+        item = data[0]
+        if isinstance(item, dict):
+            return item, None
+    return None, "ZenQuotes 응답 형식이 예상과 달라요."
 
 
 # -----------------------------
 # 심리테스트 분석
 # -----------------------------
 def analyze_answers(selected: Dict[str, str]) -> Tuple[str, Dict[str, int], str]:
-    """
-    selected: {question_id: option_text}
-    return: (best_genre, scores, reason_summary)
-    """
     scores: Dict[str, int] = {g: 0 for g in GENRE_IDS.keys()}
-    matched_reasons: List[str] = []
+    picked: List[Tuple[str, str]] = []
 
-    # 각 문항에서 선택된 옵션의 장르를 +1
-    # 최종 장르에 해당하는 이유 스니펫도 모으기 위해 우선 전체를 저장
-    picked: List[Tuple[str, str]] = []  # (genre, reason_snippet)
     for q in QUESTIONS:
-        qid = q["id"]
-        opt_text = selected.get(qid)
+        opt_text = selected.get(q["id"])
         if not opt_text:
             continue
         genre, snippet = q["options"][opt_text]
-        picked.append((genre, snippet))
         scores[genre] += 1
+        picked.append((genre, snippet))
 
-    # 최고 점수 장르 결정 (동점이면 미리 정의된 순서로 결정)
     order = list(GENRE_IDS.keys())
     best_genre = max(order, key=lambda g: (scores[g], -order.index(g)))
 
-    # 최종 장르와 일치하는 이유 스니펫을 최대 2개까지 조합
+    matched = []
     for genre, snippet in picked:
-        if genre == best_genre and snippet not in matched_reasons:
-            matched_reasons.append(snippet)
+        if genre == best_genre and snippet not in matched:
+            matched.append(snippet)
 
-    if matched_reasons:
-        reason_summary = " / ".join(matched_reasons[:2])
-    else:
-        # 혹시라도 매칭이 비면 장르별 기본 문구
-        default_reason = {
-            "액션": "속도감 있는 전개와 강렬한 장면을 즐기는 성향이에요",
-            "코미디": "가볍게 웃으며 스트레스를 푸는 게 잘 맞아요",
-            "드라마": "인물과 감정선에 몰입하는 타입이에요",
-            "SF": "새로운 설정과 아이디어에 끌리는 성향이에요",
-            "로맨스": "설렘과 관계 서사가 중요한 타입이에요",
-            "판타지": "현실을 벗어난 세계관에서 힐링하는 타입이에요",
-        }
-        reason_summary = default_reason.get(best_genre, "당신의 취향에 딱 맞는 장르예요")
-
+    reason_summary = " / ".join(matched[:2]) if matched else f"당신의 선택이 **{best_genre}** 분위기와 잘 맞아요."
     return best_genre, scores, reason_summary
 
 
-def movie_recommend_reason(best_genre: str, movie: Dict, test_reason: str) -> str:
-    """
-    영화별 추천 이유: 테스트 결과 + 장르 성향 + 평점 요소를 섞어서 간단히
-    """
-    base = f"테스트 결과가 **{best_genre}** 성향이라서 추천해요. ({test_reason})"
+def k_movie_card(movie: Dict, best_genre: str) -> Dict[str, str]:
+    title = movie.get("title") or "제목 정보 없음"
     vote = movie.get("vote_average")
-    if isinstance(vote, (int, float)) and vote >= 7.5:
-        return base + f" 게다가 평점이 **{vote:.1f}**로 높은 편이에요."
-    if isinstance(vote, (int, float)) and vote >= 6.8:
-        return base + f" 평점도 **{vote:.1f}**로 무난하게 좋습니다."
-    return base
+    poster_path = movie.get("poster_path")
+    poster_url = f"{TMDB_POSTER_BASE}{poster_path}" if poster_path else None
+    vote_str = f"{vote:.1f}/10" if isinstance(vote, (int, float)) else "정보 없음"
+    return {
+        "title": title,
+        "vote": vote_str,
+        "poster_url": poster_url,
+    }
 
 
 # -----------------------------
-# UI
+# 사이드바: 키 입력
 # -----------------------------
-st.title("🎭 심리테스트로 고르는 🎬 영화 추천 (TMDB)")
-
 with st.sidebar:
-    st.header("🔑 TMDB 설정")
-    TMDB_API_KEY = st.text_input("TMDB API Key", type="password", placeholder="여기에 입력")
-    st.caption("TMDB API Key는 저장되지 않으며, 추천 버튼을 눌렀을 때만 사용됩니다.")
+    st.header("🔑 API Keys")
+    tmdb_key = st.text_input("TMDB API Key", type="password", placeholder="TMDB 키 입력")
+    unsplash_key = st.text_input("Unsplash Access Key", type="password", placeholder="Unsplash 키 입력")
+    st.caption("키는 저장되지 않으며, 버튼을 누를 때만 API 호출에 사용됩니다.")
 
-st.write("간단한 심리테스트 답변을 바탕으로 **당신에게 어울리는 장르**를 고르고, TMDB에서 **해당 장르 인기 영화 5개**를 가져와 추천합니다.")
+# -----------------------------
+# 메인 UI
+# -----------------------------
+st.title("🎬 심리테스트로 영화 추천")
+st.write("답변을 기반으로 장르를 결정하고, **TMDB 영화 3편 + Unsplash 분위기 이미지 1장 + 오늘의 명언**을 보여줍니다.")
 
 st.divider()
 
-# 설문 폼
+# 설문(폼)
 with st.form("psy_test_form"):
     st.subheader("🧩 심리테스트")
     selected: Dict[str, str] = {}
 
     for q in QUESTIONS:
-        options = list(q["options"].keys())
         selected[q["id"]] = st.radio(
             q["question"],
-            options=options,
-            index=None,  # 선택 강제
+            options=list(q["options"].keys()),
+            index=None,
             key=q["id"],
         )
 
     submitted = st.form_submit_button("결과 보기 ✅")
 
-# 결과 처리
 if submitted:
-    # 1) 응답 검증
+    # 응답 검증
     unanswered = [q["question"] for q in QUESTIONS if not selected.get(q["id"])]
     if unanswered:
         st.error("모든 문항에 답변해 주세요!")
@@ -241,80 +271,101 @@ if submitted:
             st.write(f"- {uq}")
         st.stop()
 
-    # 2) 장르 결정
-    best_genre, scores, test_reason = analyze_answers(selected)
+    # 장르 분석
+    best_genre, scores, reason_summary = analyze_answers(selected)
     genre_id = GENRE_IDS[best_genre]
 
-    # 3) TMDB 키 확인
-    if not TMDB_API_KEY:
-        st.warning("사이드바에 TMDB API Key를 입력하면 영화 추천을 가져올 수 있어요.")
+    # 상단: 타이틀 + 장르 결과
+    st.subheader("✨ 당신의 결과")
+    top1, top2 = st.columns([1, 2], vertical_alignment="center")
+    with top1:
+        st.metric("추천 장르", best_genre)
+    with top2:
+        st.write(f"**요약:** {reason_summary}")
+        st.caption(" · ".join([f"{g}: {scores[g]}" for g in GENRE_IDS.keys()]))
+
+    st.divider()
+
+    # TMDB 영화 3편
+    if not tmdb_key:
+        st.warning("사이드바에 **TMDB API Key**를 입력하면 영화 추천을 가져올 수 있어요.")
         st.stop()
 
-    # 4) TMDB에서 영화 5개 가져오기
-    with st.spinner("TMDB에서 인기 영화를 가져오는 중..."):
-        movies, err = fetch_popular_movies_by_genre(TMDB_API_KEY, genre_id, n=5)
+    with st.spinner("🎥 TMDB에서 영화 추천을 가져오는 중..."):
+        movies, tmdb_err = fetch_movies_tmbd_by_genre(tmdb_key, genre_id, n=3)
 
-    if err:
-        st.error(f"TMDB 호출 중 오류가 발생했어요: {err}")
+    if tmdb_err:
+        st.error(f"TMDB 오류: {tmdb_err}")
         st.stop()
 
     if not movies:
-        st.info("해당 장르에서 가져올 영화가 없어요. (결과가 비어있습니다)")
+        st.info("TMDB에서 영화를 가져오지 못했어요. 장르/키/호출 제한을 확인해주세요.")
         st.stop()
 
-    # 5) 결과 표시
-    st.success("결과가 나왔어요!")
-    st.subheader("🧠 테스트 결과")
+    st.subheader("🎞️ 추천 영화 3편")
+    cols = st.columns(3, gap="large")
 
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        st.metric("당신의 추천 장르", best_genre)
-    with c2:
-        st.write(f"**추천 이유(요약):** {test_reason}")
-        # 점수표(가볍게)
-        score_line = " · ".join([f"{g}: {scores[g]}" for g in GENRE_IDS.keys()])
-        st.caption(f"장르 점수: {score_line}")
+    for i, movie in enumerate(movies[:3]):
+        card = k_movie_card(movie, best_genre)
+        with cols[i]:
+            with st.container(border=True):
+                if card["poster_url"]:
+                    st.image(card["poster_url"], use_container_width=True)
+                else:
+                    st.info("포스터 없음")
+                st.markdown(f"#### {card['title']}")
+                st.write(f"⭐ 평점: **{card['vote']}**")
 
     st.divider()
-    st.subheader(f"🎥 {best_genre} 인기 영화 TOP 5")
 
-    for idx, m in enumerate(movies, start=1):
-        title = m.get("title") or m.get("name") or "제목 정보 없음"
-        vote = m.get("vote_average")
-        release = m.get("release_date") or "개봉일 정보 없음"
-        overview = (m.get("overview") or "").strip() or "줄거리 정보가 없습니다."
-        poster_path = m.get("poster_path")
+    # 하단: 분위기 이미지 + 명언
+    bottom_left, bottom_right = st.columns([3, 2], gap="large")
 
-        poster_url = f"{TMDB_POSTER_BASE}{poster_path}" if poster_path else None
+    # Unsplash 분위기 이미지
+    with bottom_left:
+        st.subheader("🖼️ 오늘의 분위기 이미지")
+        if not unsplash_key:
+            st.warning("사이드바에 **Unsplash Access Key**를 입력하면 분위기 이미지를 가져올 수 있어요.")
+        else:
+            query = UNSPLASH_QUERY_BY_GENRE.get(best_genre, "cinematic mood")
+            with st.spinner("🌄 Unsplash에서 분위기 이미지를 가져오는 중..."):
+                img, un_err = fetch_unsplash_image(unsplash_key, query)
 
-        with st.container(border=True):
-            left, right = st.columns([1, 2], vertical_alignment="top")
-
-            with left:
-                if poster_url:
-                    st.image(poster_url, use_container_width=True)
+            if un_err:
+                st.error(f"Unsplash 오류: {un_err}")
+            else:
+                if img:
+                    image_url = img.get("urls", {}).get("regular")
+                    photographer = img.get("user", {}).get("name", "Unknown")
+                    if image_url:
+                        st.image(image_url, use_container_width=True)
+                        st.caption(f"Photo by {photographer} (Unsplash)")
+                    else:
+                        st.info("이미지 URL을 찾지 못했어요.")
                 else:
-                    st.info("포스터 이미지가 없습니다.")
+                    st.info("검색 결과가 없어요. 다른 키워드를 시도해볼까요?")
 
-            with right:
-                st.markdown(f"### {idx}. {title}")
-                # 평점 표시
-                if isinstance(vote, (int, float)):
-                    st.write(f"⭐ 평점: **{vote:.1f}/10**")
-                else:
-                    st.write("⭐ 평점: 정보 없음")
+    # ZenQuotes 명언
+    with bottom_right:
+        st.subheader("💬 오늘의 명언")
+        with st.spinner("📝 ZenQuotes에서 명언을 가져오는 중..."):
+            quote, z_err = fetch_zenquote_today()
 
-                st.write(f"📅 개봉일: **{release}**")
-
-                # 줄거리
-                st.write("📝 줄거리")
-                st.write(overview)
-
-                # 추천 이유
-                st.write("💡 이 영화를 추천하는 이유")
-                st.write(movie_recommend_reason(best_genre, m, test_reason))
-
-    st.caption("데이터 제공: TMDB (The Movie Database)")
+        if z_err:
+            st.error(f"ZenQuotes 오류: {z_err}")
+        else:
+            if quote:
+                q = quote.get("q", "명언을 가져오지 못했어요.")
+                a = quote.get("a", "")
+                st.markdown(
+                    f"""
+                    > {q}
+                    >
+                    > — **{a}**
+                    """
+                )
+            else:
+                st.info("명언 정보를 가져오지 못했어요.")
 
 else:
     st.info("모든 문항에 답한 뒤 **결과 보기 ✅** 버튼을 눌러주세요.")
