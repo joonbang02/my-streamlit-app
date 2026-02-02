@@ -4,11 +4,11 @@ import requests
 from typing import Dict, List, Tuple, Optional
 
 # -----------------------------
-# 기본 설정
+# Page / Theme
 # -----------------------------
 st.set_page_config(
-    page_title="🎭 심리테스트 기반 영화 추천 (TMDB + Unsplash + ZenQuotes + OpenAI)",
-    page_icon="🎬",
+    page_title="🎬 심리테스트 기반 영화 추천",
+    page_icon="🎭",
     layout="wide",
 )
 
@@ -38,13 +38,12 @@ GENRE_ICON = {
 UNSPLASH_QUERY_BY_GENRE = {
     "액션": "action movie cinematic",
     "코미디": "funny happy colorful",
-    "드라마": "moody film still portrait",
+    "드라마": "moody cinematic portrait",
     "SF": "sci fi futuristic neon",
-    "로맨스": "romantic couple sunset",
+    "로맨스": "romantic sunset couple",
     "판타지": "fantasy magical forest",
 }
 
-# 사이드바 국가/언어 옵션(필요하면 더 추가 가능)
 REGIONS = {
     "전체(미지정)": "",
     "한국 (KR)": "KR",
@@ -70,62 +69,86 @@ LANGUAGES = {
 }
 
 # -----------------------------
-# CSS (카드 스타일 + 콜아웃)
+# Sleek CSS
 # -----------------------------
 st.markdown(
     """
 <style>
-/* 전체 폭에서 카드 간격 조금 넉넉하게 */
-.block-container { padding-top: 1.2rem; }
+/* Layout tweaks */
+.block-container { padding-top: 1.2rem; padding-bottom: 2.2rem; max-width: 1200px; }
+div[data-testid="stSidebarContent"] { padding-top: 1.2rem; }
 
-/* 파란 콜아웃 */
-.ai-callout {
-  background: linear-gradient(135deg, rgba(30,144,255,0.10), rgba(30,144,255,0.05));
-  border: 1px solid rgba(30,144,255,0.25);
-  border-radius: 16px;
-  padding: 16px 16px;
-  box-shadow: 0 8px 24px rgba(0,0,0,0.06);
-}
+/* Typography */
+h1, h2, h3 { letter-spacing: -0.02em; }
 
-/* 영화 카드 */
-.movie-card {
-  border-radius: 18px;
+/* Top gradient hero */
+.hero {
+  border-radius: 22px;
+  padding: 18px 18px;
   border: 1px solid rgba(0,0,0,0.08);
-  box-shadow: 0 10px 28px rgba(0,0,0,0.08);
-  padding: 14px;
-  background: rgba(255,255,255,0.90);
+  background: radial-gradient(1200px 220px at 10% 10%, rgba(30,144,255,0.18), transparent 55%),
+              radial-gradient(900px 260px at 90% 30%, rgba(255,105,180,0.12), transparent 55%),
+              rgba(255,255,255,0.70);
+  box-shadow: 0 16px 50px rgba(0,0,0,0.08);
 }
 
-.movie-title {
-  font-size: 1.05rem;
-  font-weight: 700;
-  margin: 8px 0 4px 0;
+/* Glass section */
+.glass {
+  border-radius: 20px;
+  padding: 16px 16px;
+  border: 1px solid rgba(0,0,0,0.08);
+  background: rgba(255,255,255,0.75);
+  box-shadow: 0 12px 36px rgba(0,0,0,0.06);
 }
 
-.small-muted {
-  color: rgba(0,0,0,0.55);
-  font-size: 0.90rem;
-}
-
-.section-title {
-  font-size: 1.25rem;
-  font-weight: 800;
-  margin: 0.2rem 0 0.6rem 0;
-}
-
-.quote-box {
+/* AI callout */
+.ai-callout {
+  border-radius: 18px;
   padding: 14px 14px;
-  border-radius: 16px;
-  border: 1px dashed rgba(0,0,0,0.18);
-  background: rgba(0,0,0,0.02);
+  border: 1px solid rgba(30,144,255,0.25);
+  background: linear-gradient(135deg, rgba(30,144,255,0.12), rgba(30,144,255,0.05));
+  box-shadow: 0 12px 32px rgba(0,0,0,0.06);
 }
+
+/* Movie card */
+.movie-card {
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid rgba(0,0,0,0.08);
+  background: rgba(255,255,255,0.92);
+  box-shadow: 0 12px 34px rgba(0,0,0,0.08);
+}
+.movie-pad { padding: 12px 12px 10px 12px; }
+.movie-title { font-size: 1.05rem; font-weight: 800; margin: 6px 0 2px 0; letter-spacing: -0.02em; }
+.muted { color: rgba(0,0,0,0.55); font-size: 0.92rem; }
+
+/* Quote */
+.quote {
+  border-radius: 18px;
+  padding: 14px 14px;
+  border: 1px dashed rgba(0,0,0,0.18);
+  background: rgba(0,0,0,0.03);
+}
+.quote .q { font-style: italic; font-size: 1.02rem; line-height: 1.55; }
+.quote .a { font-style: italic; font-size: 0.88rem; color: rgba(0,0,0,0.55); margin-top: 8px; }
+
+/* Buttons row */
+.btnrow {
+  border-radius: 18px;
+  padding: 10px 10px;
+  border: 1px solid rgba(0,0,0,0.08);
+  background: rgba(255,255,255,0.68);
+}
+
+/* Hide Streamlit default anchors spacing */
+[data-testid="stHeader"] { background: rgba(255,255,255,0.0); }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 # -----------------------------
-# 심리테스트 질문
+# Questions
 # -----------------------------
 QUESTIONS = [
     {
@@ -149,7 +172,7 @@ QUESTIONS = [
             "인물의 성장, 현실적인 이야기": ("드라마", "캐릭터와 서사가 핵심이에요"),
             "미래/우주/기술 같은 설정": ("SF", "설정의 신선함이 가장 끌려요"),
             "케미, 감정선, 관계의 진전": ("로맨스", "감정의 흐름이 중요해요"),
-            "마법/전설/이세계 분위기": ("판타지", "현실 밖 세계관이 좋아요"),
+            "마법/전설/이세계 분위기": ("판타지", "현실 밖 세계관이 좋아해요"),
         },
     },
     {
@@ -203,54 +226,50 @@ QUESTIONS = [
 ]
 
 # -----------------------------
-# 유틸
+# Network helpers
 # -----------------------------
-def safe_get_json(url: str, params: Optional[Dict] = None, headers: Optional[Dict] = None) -> Tuple[Optional[object], Optional[str]]:
+def safe_get_json(url: str, params: Optional[Dict] = None) -> Tuple[Optional[object], Optional[str]]:
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=12)
+        r = requests.get(url, params=params, timeout=12)
         r.raise_for_status()
         return r.json(), None
     except requests.RequestException as e:
         return None, str(e)
 
 
+# -----------------------------
+# Analysis
+# -----------------------------
 def analyze_answers(selected: Dict[str, str]) -> Tuple[str, Dict[str, int], str, List[str]]:
     scores: Dict[str, int] = {g: 0 for g in GENRE_IDS.keys()}
-    picked: List[Tuple[str, str]] = []
     picked_texts: List[str] = []
+    snippets: Dict[str, List[str]] = {g: [] for g in GENRE_IDS.keys()}
 
     for q in QUESTIONS:
         opt_text = selected.get(q["id"])
-        if not opt_text:
-            continue
         genre, snippet = q["options"][opt_text]
         scores[genre] += 1
-        picked.append((genre, snippet))
         picked_texts.append(f"{q['question']} -> {opt_text}")
+        if snippet not in snippets[genre]:
+            snippets[genre].append(snippet)
 
     order = list(GENRE_IDS.keys())
     best_genre = max(order, key=lambda g: (scores[g], -order.index(g)))
-
-    matched = []
-    for genre, snippet in picked:
-        if genre == best_genre and snippet not in matched:
-            matched.append(snippet)
-
-    reason_summary = " / ".join(matched[:2]) if matched else f"당신의 선택이 **{best_genre}** 분위기와 잘 맞아요."
+    reason_summary = " / ".join(snippets[best_genre][:2]) if snippets[best_genre] else f"{best_genre} 성향이 강해요."
     return best_genre, scores, reason_summary, picked_texts
 
 
 # -----------------------------
-# TMDB / Unsplash / ZenQuotes
+# APIs
 # -----------------------------
 @st.cache_data(ttl=60 * 30)
-def fetch_movies_tmdb_discover(
+def fetch_movies_tmdb(
     api_key: str,
     genre_id: int,
-    n: int = 3,
-    min_rating: float = 0.0,
-    region: str = "",
-    original_lang: str = "",
+    n: int,
+    min_rating: float,
+    region: str,
+    original_lang: str,
 ) -> Tuple[List[Dict], Optional[str]]:
     url = f"{TMDB_BASE}/discover/movie"
     params = {
@@ -262,7 +281,7 @@ def fetch_movies_tmdb_discover(
         "include_video": "false",
         "page": 1,
         "vote_average.gte": min_rating,
-        "vote_count.gte": 50,  # 평점 신뢰도 보정(원하면 조정)
+        "vote_count.gte": 50,
     }
     if region:
         params["region"] = region
@@ -273,13 +292,12 @@ def fetch_movies_tmdb_discover(
     if err:
         return [], err
     if not isinstance(data, dict) or "results" not in data:
-        return [], "TMDB 응답 형식이 예상과 달라요. API Key/호출 제한을 확인해주세요."
-    results = data.get("results") or []
-    return results[:n], None
+        return [], "TMDB 응답 형식이 예상과 달라요."
+    return (data.get("results") or [])[:n], None
 
 
 @st.cache_data(ttl=60 * 30)
-def fetch_unsplash_image(access_key: str, query: str) -> Tuple[Optional[Dict], Optional[str]]:
+def fetch_unsplash(access_key: str, query: str) -> Tuple[Optional[Dict], Optional[str]]:
     url = f"{UNSPLASH_BASE}/search/photos"
     params = {
         "query": query,
@@ -297,7 +315,7 @@ def fetch_unsplash_image(access_key: str, query: str) -> Tuple[Optional[Dict], O
 
 
 @st.cache_data(ttl=60 * 60)
-def fetch_zenquote_today() -> Tuple[Optional[Dict], Optional[str]]:
+def fetch_quote_today() -> Tuple[Optional[Dict], Optional[str]]:
     data, err = safe_get_json(ZENQUOTES_URL)
     if err:
         return None, err
@@ -312,32 +330,18 @@ def poster_url(movie: Dict) -> Optional[str]:
 
 
 # -----------------------------
-# OpenAI (스트리밍 타이핑 효과)
+# OpenAI streaming (typing)
 # -----------------------------
-def stream_openai_text(openai_key: str, prompt: str, model: str = "gpt-4.1-mini"):
-    """
-    openai python SDK(v1) 기반 스트리밍.
-    환경에 SDK가 없으면 ImportError -> 예외로 처리.
-    """
+def stream_openai_text(openai_key: str, prompt: str, model: str):
     from openai import OpenAI
-
     client = OpenAI(api_key=openai_key)
-    # Responses API 스트리밍 (SDK 버전에 따라 동작)
-    with client.responses.stream(
-        model=model,
-        input=prompt,
-    ) as stream:
+    with client.responses.stream(model=model, input=prompt) as stream:
         for event in stream:
-            # 텍스트 델타 이벤트
             if getattr(event, "type", None) == "response.output_text.delta":
                 yield event.delta
-        # stream.get_final_response()  # 필요 시 사용
 
 
 def typing_effect(container, text_stream):
-    """
-    Streamlit typing effect helper
-    """
     out = container.empty()
     buf = ""
     for chunk in text_stream:
@@ -346,7 +350,7 @@ def typing_effect(container, text_stream):
     return buf
 
 
-def build_user_profile_context(picked_texts: List[str], best_genre: str, reason_summary: str) -> str:
+def build_context(picked_texts: List[str], best_genre: str, reason_summary: str) -> str:
     return (
         f"[심리테스트 응답]\n" + "\n".join(picked_texts) + "\n\n"
         f"[결과 장르] {best_genre}\n"
@@ -355,240 +359,217 @@ def build_user_profile_context(picked_texts: List[str], best_genre: str, reason_
 
 
 # -----------------------------
-# 세션 초기화/리셋
+# State & Navigation (Question / Result split)
 # -----------------------------
-def reset_test():
+if "page" not in st.session_state:
+    st.session_state.page = "questions"  # "results"
+
+if "result_payload" not in st.session_state:
+    st.session_state.result_payload = None
+
+def go_questions():
+    st.session_state.page = "questions"
+    st.session_state.result_payload = None
+    # 선택값 리셋
     for q in QUESTIONS:
-        if q["id"] in st.session_state:
-            st.session_state[q["id"]] = None
-    st.session_state["submitted_once"] = False
+        st.session_state[q["id"]] = None
     st.rerun()
 
+def go_results(payload: Dict):
+    st.session_state.page = "results"
+    st.session_state.result_payload = payload
+    st.rerun()
 
 # -----------------------------
-# 사이드바
+# Sidebar (keys + filters)
 # -----------------------------
 with st.sidebar:
     st.header("🔑 API Keys")
     tmdb_key = st.text_input("TMDB API Key", type="password", placeholder="TMDB 키 입력")
     unsplash_key = st.text_input("Unsplash Access Key", type="password", placeholder="Unsplash 키 입력")
     openai_key = st.text_input("OpenAI API Key", type="password", placeholder="OpenAI 키 입력")
+    st.caption("키는 저장되지 않으며, 버튼 클릭 시에만 사용됩니다.")
 
     st.divider()
 
     st.header("🎚️ 영화 필터")
-    min_rating = st.slider("최소 평점 (vote_average.gte)", 0.0, 10.0, 6.5, 0.5)
+    min_rating = st.slider("최소 평점", 0.0, 10.0, 6.5, 0.5)
 
     region_label = st.selectbox("국가(Region)", list(REGIONS.keys()), index=0)
     lang_label = st.selectbox("원어(Original Language)", list(LANGUAGES.keys()), index=0)
-
     region = REGIONS[region_label]
     original_lang = LANGUAGES[lang_label]
 
-    st.caption("TMDB Discover 기준으로 필터링합니다. (인기순 + 최소 평점 + 국가/언어)")
-
     st.divider()
     ai_model = st.text_input("OpenAI 모델(선택)", value="gpt-4.1-mini")
-    st.caption("모델명은 계정/환경에 따라 다를 수 있어요.")
 
 # -----------------------------
-# 메인
+# Page: Questions
 # -----------------------------
-st.title("🎬 심리테스트로 영화 추천")
-st.write("결과 보기 버튼을 누르면 **TMDB 영화 3편 + Unsplash 무드 이미지 1장 + 오늘의 명언 + AI 해석**을 보여줍니다.")
+if st.session_state.page == "questions":
+    st.markdown(
+        """
+<div class="hero">
+  <div style="font-size:1.9rem; font-weight:900;">🎭 오늘의 기분으로 고르는 영화 추천</div>
+  <div class="muted" style="margin-top:6px;">
+    6개의 질문에 답하면, <b>장르</b>를 분석해 <b>영화 3편</b>과 <b>무드 이미지</b>, <b>오늘의 명언</b>을 보여드려요.
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-st.divider()
+    st.write("")
+    with st.container():
+        st.markdown('<div class="glass">', unsafe_allow_html=True)
+        st.subheader("🧩 심리테스트")
+        with st.form("psy_test_form"):
+            selected: Dict[str, str] = {}
+            for q in QUESTIONS:
+                selected[q["id"]] = st.radio(
+                    q["question"],
+                    options=list(q["options"].keys()),
+                    index=None,
+                    key=q["id"],
+                )
 
-# 설문 폼
-with st.form("psy_test_form"):
-    st.subheader("🧩 심리테스트")
-    selected: Dict[str, str] = {}
+            submitted = st.form_submit_button("결과 보기 ✅")
 
-    for q in QUESTIONS:
-        selected[q["id"]] = st.radio(
-            q["question"],
-            options=list(q["options"].keys()),
-            index=None,
-            key=q["id"],
-        )
+        st.markdown("</div>", unsafe_allow_html=True)
 
-    submitted = st.form_submit_button("결과 보기 ✅")
+    if submitted:
+        # validation
+        unanswered = [q["question"] for q in QUESTIONS if not selected.get(q["id"])]
+        if unanswered:
+            st.error("모든 문항에 답변해 주세요!")
+            for uq in unanswered:
+                st.write(f"- {uq}")
+            st.stop()
 
-# 상태값(공유용)
-if "submitted_once" not in st.session_state:
-    st.session_state["submitted_once"] = False
+        # analyze
+        best_genre, scores, reason_summary, picked_texts = analyze_answers(selected)
+        genre_id = GENRE_IDS[best_genre]
 
-if submitted:
-    st.session_state["submitted_once"] = True
+        # fetch movies
+        if not tmdb_key:
+            st.warning("사이드바에 **TMDB API Key**를 입력하면 영화 추천을 가져올 수 있어요.")
+            st.stop()
 
-if st.session_state["submitted_once"]:
-    # 응답 검증
-    unanswered = [q["question"] for q in QUESTIONS if not selected.get(q["id"])]
-    if unanswered:
-        st.error("모든 문항에 답변해 주세요!")
-        for uq in unanswered:
-            st.write(f"- {uq}")
-        st.stop()
+        with st.spinner("🎥 추천 콘텐츠를 준비 중..."):
+            movies, tmdb_err = fetch_movies_tmdb(
+                tmdb_key, genre_id, n=3,
+                min_rating=min_rating,
+                region=region,
+                original_lang=original_lang,
+            )
+            if tmdb_err:
+                st.error(f"TMDB 오류: {tmdb_err}")
+                st.stop()
+            if not movies:
+                st.info("조건에 맞는 영화가 없어요. (평점/국가/언어 필터를 낮춰보세요)")
+                st.stop()
 
-    # 장르 분석
-    best_genre, scores, reason_summary, picked_texts = analyze_answers(selected)
-    genre_id = GENRE_IDS[best_genre]
+            # unsplash
+            mood_img = None
+            mood_err = None
+            if unsplash_key:
+                mood_query = UNSPLASH_QUERY_BY_GENRE.get(best_genre, "cinematic mood")
+                mood_img, mood_err = fetch_unsplash(unsplash_key, mood_query)
+
+            # quote
+            quote, quote_err = fetch_quote_today()
+
+        payload = {
+            "best_genre": best_genre,
+            "scores": scores,
+            "reason_summary": reason_summary,
+            "picked_texts": picked_texts,
+            "movies": movies,
+            "mood_img": mood_img,
+            "mood_err": mood_err,
+            "quote": quote,
+            "quote_err": quote_err,
+        }
+        go_results(payload)
+
+# -----------------------------
+# Page: Results
+# -----------------------------
+else:
+    payload = st.session_state.result_payload
+    if not payload:
+        st.info("결과가 없어요. 테스트 페이지로 이동합니다.")
+        go_questions()
+
+    best_genre = payload["best_genre"]
+    scores = payload["scores"]
+    reason_summary = payload["reason_summary"]
+    picked_texts = payload["picked_texts"]
+    movies = payload["movies"]
+    mood_img = payload["mood_img"]
+    mood_err = payload["mood_err"]
+    quote = payload["quote"]
+    quote_err = payload["quote_err"]
+
     icon = GENRE_ICON.get(best_genre, "🎬")
 
-    # -----------------------------
-    # 헤더: 장르 아이콘 + 타이틀
-    # -----------------------------
-    with st.container():
-        st.markdown(
-            f"""
-            <div style="display:flex; align-items:center; gap:12px;">
-              <div style="font-size:2.0rem;">{icon}</div>
-              <div style="font-size:1.8rem; font-weight:900;">
-                당신에게 딱인 장르는 <span style="color:#1E90FF;">{best_genre}</span>!
-              </div>
-            </div>
-            <div class="small-muted" style="margin-top:6px;">
-              {reason_summary}
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+    # Header
+    st.markdown(
+        f"""
+<div class="hero">
+  <div style="display:flex; align-items:center; gap:12px;">
+    <div style="font-size:2.2rem;">{icon}</div>
+    <div style="font-size:2.0rem; font-weight:950;">
+      당신에게 딱인 장르는 <span style="color:#1E90FF;">{best_genre}</span>!
+    </div>
+  </div>
+  <div class="muted" style="margin-top:8px;">
+    {reason_summary} &nbsp; · &nbsp; {" · ".join([f"{g}:{scores[g]}" for g in GENRE_IDS.keys()])}
+  </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
-    st.divider()
+    st.write("")
 
-    # -----------------------------
-    # TMDB 영화 3편
-    # -----------------------------
-    if not tmdb_key:
-        st.warning("사이드바에 **TMDB API Key**를 입력하면 영화 추천을 가져올 수 있어요.")
-        st.stop()
-
-    with st.spinner("🎥 TMDB에서 추천 영화를 가져오는 중..."):
-        movies, tmdb_err = fetch_movies_tmdb_discover(
-            tmdb_key,
-            genre_id,
-            n=3,
-            min_rating=min_rating,
-            region=region,
-            original_lang=original_lang,
-        )
-
-    if tmdb_err:
-        st.error(f"TMDB 오류: {tmdb_err}")
-        st.stop()
-
-    if not movies:
-        st.info("조건에 맞는 영화가 없어요. (평점/국가/언어 필터를 낮춰보세요)")
-        st.stop()
-
-    # -----------------------------
-    # AI 분석(파란 callout)
-    # -----------------------------
+    # AI Analysis
     st.markdown('<div class="section-title">🤖 AI 분석</div>', unsafe_allow_html=True)
     with st.container():
         st.markdown('<div class="ai-callout">', unsafe_allow_html=True)
+        area = st.container()
 
-        ai_area = st.container()
         fallback = (
-            "AI 키가 없어서 기본 문구로 표시해요. "
-            "당신은 지금의 기분/취향에 맞춰 장르를 고르는 편이고, "
-            "오늘은 그중에서도 이 장르의 몰입감이 잘 맞는 날이에요."
+            "당신은 그날의 기분과 원하는 감정(속도감/여운/설렘 등)을 비교적 명확하게 고르는 편이에요. "
+            f"오늘은 특히 **{best_genre}**의 몰입감이 스트레스나 공허함을 잘 메워줄 가능성이 높습니다."
         )
 
         if not openai_key:
-            ai_area.markdown(fallback)
+            area.markdown(fallback)
         else:
             try:
-                ctx = build_user_profile_context(picked_texts, best_genre, reason_summary)
-                prompt_personality = f"""
-너는 한국어로 짧고 따뜻하게 심리테스트 결과를 해석하는 AI야.
-아래 정보를 보고, '사용자 성향 설명'을 2~3문장으로 작성해줘.
-과장/단정은 피하고, 부드럽고 구체적으로.
+                ctx = build_context(picked_texts, best_genre, reason_summary)
+                prompt = f"""
+너는 한국어로 짧고 세련되게 심리테스트 성향을 해석하는 AI야.
+아래 정보를 바탕으로 '성향 설명'을 2~3문장으로 작성해줘.
+단정/진단처럼 말하지 말고, 부드럽고 구체적으로.
 
 {ctx}
 
-출력은 문장만(불릿/번호 없이) 작성해줘.
+출력은 문장만(불릿/번호 없이).
 """.strip()
-
-                typing_effect(
-                    ai_area,
-                    stream_openai_text(openai_key, prompt_personality, model=ai_model),
-                )
+                typing_effect(area, stream_openai_text(openai_key, prompt, model=ai_model))
             except Exception as e:
-                ai_area.markdown(fallback)
-                ai_area.caption(f"(OpenAI 호출 실패: {e})")
+                area.markdown(fallback)
+                area.caption(f"(OpenAI 호출 실패: {e})")
 
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.divider()
 
-    # -----------------------------
-    # 영화 카드 3열 그리드 + expander
-    # -----------------------------
+    # Movies grid
     st.markdown('<div class="section-title">🎞️ 추천 영화 3편</div>', unsafe_allow_html=True)
-
     cols = st.columns(3, gap="large")
-
-    # 영화 추천 이유(1~2문장): 전체 공통 요약 + 각 영화 1문장(옵션)
-    overall_reason = ""
-    per_movie_reason: Dict[str, str] = {}
-
-    if openai_key:
-        try:
-            ctx = build_user_profile_context(picked_texts, best_genre, reason_summary)
-            movie_brief = "\n".join(
-                [
-                    f"- {m.get('title','')} (평점 {m.get('vote_average','?')}, 개봉 {m.get('release_date','?')})"
-                    for m in movies
-                ]
-            )
-            prompt_movie_reason = f"""
-너는 한국어로 영화 추천 이유를 간단히 설명하는 AI야.
-아래 사용자 성향과 추천 영화 목록을 보고,
-1) 전체 추천 이유를 1~2문장으로,
-2) 각 영화별로 1문장씩(총 3개) 이유를 작성해줘.
-
-형식은 정확히 아래처럼:
-[전체]
-...문장...
-[영화별]
-영화제목: ...문장...
-영화제목: ...문장...
-영화제목: ...문장...
-
-{ctx}
-
-[추천 영화]
-{movie_brief}
-""".strip()
-
-            # 스트리밍으로 받아서 파싱(가볍게)
-            tmp = st.empty()
-            buf = ""
-
-            try:
-                for chunk in stream_openai_text(openai_key, prompt_movie_reason, model=ai_model):
-                    buf += chunk
-                    tmp.markdown(buf)
-            finally:
-                # 화면에 남기지 않고(중복 방지) 파싱 후 지움
-                tmp.empty()
-
-            # 파싱
-            # 매우 단순 파서: 섹션별 분리
-            if "[전체]" in buf and "[영화별]" in buf:
-                part1 = buf.split("[영화별]")[0]
-                overall_reason = part1.replace("[전체]", "").strip()
-
-                part2 = buf.split("[영화별]")[1].strip()
-                for line in part2.splitlines():
-                    if ":" in line:
-                        title, reason = line.split(":", 1)
-                        per_movie_reason[title.strip()] = reason.strip()
-
-        except Exception:
-            pass
-
     for i, m in enumerate(movies):
         title = m.get("title") or "제목 정보 없음"
         vote = m.get("vote_average")
@@ -599,140 +580,132 @@ if st.session_state["submitted_once"]:
 
         with cols[i]:
             st.markdown('<div class="movie-card">', unsafe_allow_html=True)
-
             if purl:
                 st.image(purl, use_container_width=True)
             else:
                 st.info("포스터 없음")
 
+            st.markdown('<div class="movie-pad">', unsafe_allow_html=True)
             st.markdown(f'<div class="movie-title">{title}</div>', unsafe_allow_html=True)
-            st.markdown(f'<div class="small-muted">⭐ 평점: <b>{vote_str}</b></div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="muted">⭐ 평점: <b>{vote_str}</b></div>', unsafe_allow_html=True)
 
-            with st.expander("상세 보기"):
+            with st.expander("상세 정보 / 추천 이유"):
                 st.write(f"📅 개봉일: **{release}**")
                 st.write("📝 줄거리")
                 st.write(overview)
 
-                st.write("💡 추천하는 이유")
-                # 영화별 이유 우선, 없으면 전체 이유를 사용
-                reason = per_movie_reason.get(title) or overall_reason
-                if reason:
-                    st.write(reason)
+                st.write("💡 추천 이유")
+                if not openai_key:
+                    st.write(f"당신의 **{best_genre}** 성향( {reason_summary} )과 잘 맞아서 추천해요.")
                 else:
-                    st.write("당신의 현재 성향과 장르 취향에 잘 맞는 작품이라 추천해요.")
-
-            st.markdown("</div>", unsafe_allow_html=True)
-
-    if overall_reason:
-        st.caption(f"AI 추천 요약: {overall_reason}")
-
-    st.divider()
-
-    # -----------------------------
-    # 분위기 섹션: 이미지 크게 + 제목
-    # -----------------------------
-    mood_left, mood_right = st.columns([3, 2], gap="large")
-
-    with mood_left:
-        st.markdown('<div class="section-title">🌄 오늘의 무드</div>', unsafe_allow_html=True)
-
-        if not unsplash_key:
-            st.warning("사이드바에 **Unsplash Access Key**를 입력하면 무드 이미지를 가져올 수 있어요.")
-        else:
-            query = UNSPLASH_QUERY_BY_GENRE.get(best_genre, "cinematic mood")
-            with st.spinner("🖼️ Unsplash에서 무드 이미지를 가져오는 중..."):
-                img, un_err = fetch_unsplash_image(unsplash_key, query)
-
-            if un_err:
-                st.error(f"Unsplash 오류: {un_err}")
-            else:
-                if img:
-                    image_url = img.get("urls", {}).get("regular")
-                    photographer = img.get("user", {}).get("name", "Unknown")
-                    if image_url:
-                        st.image(image_url, use_container_width=True)
-                        st.caption(f"Photo by {photographer} (Unsplash)")
-                    else:
-                        st.info("이미지 URL을 찾지 못했어요.")
-                else:
-                    st.info("검색 결과가 없어요. (장르 무드 검색어가 너무 좁을 수 있어요)")
-
-    # -----------------------------
-    # 명언 섹션: 이탤릭 + 저자 작은 글씨 + AI 해석(1문장)
-    # -----------------------------
-    with mood_right:
-        st.markdown('<div class="section-title">💬 오늘의 명언</div>', unsafe_allow_html=True)
-
-        with st.spinner("📝 ZenQuotes에서 명언을 가져오는 중..."):
-            quote, z_err = fetch_zenquote_today()
-
-        if z_err or not quote:
-            st.error(f"ZenQuotes 오류: {z_err or '명언을 가져오지 못했어요.'}")
-            quote_text = ""
-            quote_author = ""
-        else:
-            quote_text = quote.get("q", "")
-            quote_author = quote.get("a", "")
-
-            st.markdown(
-                f"""
-<div class="quote-box">
-  <div style="font-style: italic; font-size: 1.02rem;">“{quote_text}”</div>
-  <div class="small-muted" style="margin-top:8px; font-style: italic;">— {quote_author}</div>
-</div>
-""",
-                unsafe_allow_html=True,
-            )
-
-        st.write("")  # 여백
-
-        st.markdown("**🧠 명언을 당신 성향에 맞게 해석**")
-        if not openai_key or not quote_text:
-            st.write("오늘은 너무 무겁게 끌고 가지 말고, 지금의 흐름을 자연스럽게 이어가면 좋아요.")
-        else:
-            try:
-                ctx = build_user_profile_context(picked_texts, best_genre, reason_summary)
-                prompt_quote = f"""
-너는 한국어로 명언을 '사용자 성향'에 맞게 1문장으로 해석하는 AI야.
-아래 사용자 성향/결과를 참고해서, 명언을 오늘의 행동/마음가짐으로 연결해줘.
-반드시 1문장, 존댓말, 너무 오글거리게 말하지 않기.
+                    try:
+                        ctx = build_context(picked_texts, best_genre, reason_summary)
+                        prompt = f"""
+너는 한국어로 '왜 이 영화를 추천하는지'를 1~2문장으로 설명하는 AI야.
+사용자 성향과 장르 결과를 고려해, 아래 영화에 대해 짧게 말해줘.
+너무 과장하지 말고, 자연스럽게.
 
 {ctx}
 
-[오늘의 명언]
-{quote_text} — {quote_author}
+[영화]
+제목: {title}
+평점: {vote}
+개봉: {release}
 """.strip()
+                        typing_effect(st, stream_openai_text(openai_key, prompt, model=ai_model))
+                    except Exception:
+                        st.write(f"당신의 **{best_genre}** 무드에 맞는 템포/감정선을 가진 작품이라 추천해요.")
 
-                placeholder = st.container()
-                typing_effect(placeholder, stream_openai_text(openai_key, prompt_quote, model=ai_model))
-            except Exception as e:
-                st.write("오늘은 당신의 리듬을 지키는 게 제일 중요해요—무리하지 말고 한 걸음만 가보세요.")
-                st.caption(f"(OpenAI 호출 실패: {e})")
+            st.markdown("</div>", unsafe_allow_html=True)  # movie-pad
+            st.markdown("</div>", unsafe_allow_html=True)  # movie-card
 
     st.divider()
 
-    # -----------------------------
-    # 하단 버튼: 다시 테스트하기 + 결과 공유하기
-    # -----------------------------
-    b1, b2, b3 = st.columns([1, 1, 2], gap="medium")
+    # Mood + Quote
+    left, right = st.columns([3, 2], gap="large")
 
+    with left:
+        st.markdown('<div class="section-title">🌄 오늘의 무드</div>', unsafe_allow_html=True)
+        with st.container():
+            st.markdown('<div class="glass">', unsafe_allow_html=True)
+            if mood_err:
+                st.error(f"Unsplash 오류: {mood_err}")
+            elif not mood_img:
+                st.info("Unsplash 키가 없거나 검색 결과가 없어요.")
+            else:
+                image_url = mood_img.get("urls", {}).get("regular")
+                photographer = mood_img.get("user", {}).get("name", "Unknown")
+                if image_url:
+                    st.image(image_url, use_container_width=True)
+                    st.caption(f"Photo by {photographer} (Unsplash)")
+                else:
+                    st.info("이미지 URL을 찾지 못했어요.")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    with right:
+        st.markdown('<div class="section-title">💬 오늘의 명언</div>', unsafe_allow_html=True)
+        with st.container():
+            st.markdown('<div class="glass">', unsafe_allow_html=True)
+
+            quote_text = ""
+            quote_author = ""
+            if quote_err or not quote:
+                st.error(f"ZenQuotes 오류: {quote_err or '명언을 가져오지 못했어요.'}")
+            else:
+                quote_text = quote.get("q", "")
+                quote_author = quote.get("a", "")
+                st.markdown(
+                    f"""
+<div class="quote">
+  <div class="q">“{quote_text}”</div>
+  <div class="a">— {quote_author}</div>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+
+            st.write("")
+            st.markdown("**🧠 오늘의 해석**")
+
+            if not openai_key or not quote_text:
+                st.write("오늘은 마음의 리듬을 지키면서, 딱 한 가지 행동만 가볍게 실천해보면 좋아요.")
+            else:
+                try:
+                    ctx = build_context(picked_texts, best_genre, reason_summary)
+                    prompt = f"""
+너는 한국어로 명언을 '사용자 성향'에 맞춰 1문장으로 해석하는 AI야.
+반드시 1문장, 존댓말, 자연스럽게(오글거림 금지).
+
+{ctx}
+
+[명언]
+{quote_text} — {quote_author}
+""".strip()
+                    typing_effect(st, stream_openai_text(openai_key, prompt, model=ai_model))
+                except Exception:
+                    st.write("오늘은 무리하지 말고, 지금의 흐름을 한 번만 더 이어가보세요.")
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # Bottom buttons
+    st.markdown('<div class="btnrow">', unsafe_allow_html=True)
+    b1, b2, b3 = st.columns([1, 1, 2], gap="medium")
     with b1:
         if st.button("🔄 다시 테스트하기", use_container_width=True):
-            reset_test()
-
+            go_questions()
     with b2:
         share_clicked = st.button("📣 결과 공유하기", use_container_width=True)
-
     with b3:
-        # 공유 텍스트(버튼 누르면 표시)
         if share_clicked:
             titles = [m.get("title", "") for m in movies]
+            qtext = quote.get("q", "") if quote else ""
+            qauth = quote.get("a", "") if quote else ""
             share_text = (
-                f"{GENRE_ICON.get(best_genre,'🎬')} 심리테스트 결과: {best_genre}\n"
+                f"{GENRE_ICON.get(best_genre,'🎬')} 결과 장르: {best_genre}\n"
                 f"추천 영화: {', '.join([t for t in titles if t])}\n"
-                f"오늘의 명언: “{quote_text}” — {quote_author}\n"
+                f"오늘의 명언: “{qtext}” — {qauth}\n"
             )
-            st.text_area("공유용 텍스트(복사해서 사용하세요)", value=share_text, height=120)
-
-else:
-    st.info("모든 문항에 답한 뒤 **결과 보기 ✅** 버튼을 눌러주세요.")
+            st.text_area("공유용 텍스트(복사해서 사용)", value=share_text, height=110)
+    st.markdown("</div>", unsafe_allow_html=True)
