@@ -1,36 +1,26 @@
 # app.py
-# Travel-Maker — Expanded "All the things" Edition (Single file)
+# Travel-Maker — Expanded "All the things" Edition (Updated)
 #
-# ✅ Features (practically everything extendable):
-# 1) Beige minimal UI + MZ vibe copy
-# 2) Multi-step input flow (Page1/Page2) + optional start date
-# 3) Free APIs (no key):
-#    - Geocoding: Nominatim (OpenStreetMap)
-#    - POIs: Overpass API (OpenStreetMap)
-#    - Weather: Open-Meteo
-# 4) Distance: Haversine (from start city to destination)
-# 5) Automatic itinerary generation:
-#    - POI collection around destination
-#    - POI scoring by style
-#    - K-means-like clustering into days (pure python)
-#    - Within-day route ordering (nearest-neighbor)
-# 6) Optional OpenAI:
-#    - Responses API + web_search tool to "reference internet" + source listing
-#    - Fallback always works if key missing / call fails
-# 7) Budget allocation w/ style-based weights
-# 8) Checklist suggestions
-# 9) Editable itinerary (AM/PM/Night)
-# 10) Exports:
-#    - Download JSON
-#    - Download ICS (Calendar)
-#    - Download PDF (ReportLab)
+# ✅ Changes requested:
+# - Page 1: "희망 여행 방식(자유/패키지)" 입력 제거
+# - Page 2: "여행지와의 거리 선호" 입력 제거
+# - NEW: Day별 이동시간(추정치) 계산 기능 추가 (POI 간 거리 기반, 이동수단 속도 가정)
 #
-# Notes:
-# - Overpass has rate limits; caching is used.
-# - Weather: if start date within forecast window, show actual daily forecast; otherwise show snapshot + seasonal hint.
+# ✅ Still included (확장 가능한 것들):
+# - Beige minimal UI + MZ vibe
+# - Multi-step inputs (Page1/Page2) + start date (sidebar)
+# - Free APIs (no key):
+#   - Geocoding: Nominatim (OSM)
+#   - POIs: Overpass API (OSM)
+#   - Weather: Open-Meteo
+# - POI 자동 수집 → 일자별 클러스터링 → 하루 동선 정렬(Nearest Neighbor)
+# - Optional OpenAI (Responses API + web_search + sources best-effort)
+# - Budget allocation + checklist + itinerary editing
+# - Export JSON / ICS / PDF
 #
-# Run:
+# Install:
 #   pip install streamlit requests openai reportlab
+# Run:
 #   streamlit run app.py
 
 import os
@@ -177,16 +167,14 @@ def init_state():
         st.session_state.step = 1
 
     defaults = {
-        # Page 1
+        # Page 1 (travel_mode removed)
         "travel_month": "상관없음",
         "party_type": "친구",
         "party_count": 2,
         "destination_scope": "국내",
         "destination_text": "",
-        "travel_mode": "자유여행",
 
-        # Page 2
-        "distance_pref": "상관없음",
+        # Page 2 (distance_pref removed)
         "duration": "3일",
         "travel_style": ["힐링"],
         "budget": 1000000,
@@ -197,6 +185,15 @@ def init_state():
         # Sidebar
         "start_city": "서울",
         "openai_api_key": "",
+
+        # NEW: travel mode moved to sidebar (optional)
+        "travel_mode_sidebar": "자유여행",
+
+        # NEW: 이동수단(시간 추정치용)
+        "move_mode": "자동",  # 자동/도보/대중교통/차량
+        "include_return_to_center": True,  # 하루 마지막에 중심(대략 숙소)로 돌아오는 이동 포함
+
+        # POI config
         "show_map": True,
         "show_budget": True,
         "show_checklist": True,
@@ -212,7 +209,7 @@ def init_state():
         # Itinerary edits
         "itinerary_edits": {},
 
-        # POI selection (optional user filter)
+        # POI selection
         "poi_user_exclude": set(),
     }
     for k, v in defaults.items():
@@ -252,7 +249,7 @@ def geocode_place(query: str) -> Optional[Dict[str, Any]]:
     params = {"q": query, "format": "json", "limit": 1}
     headers = {"User-Agent": f"{APP_NAME}/1.0 (streamlit)"}
     try:
-        time.sleep(0.15)  # be polite
+        time.sleep(0.15)
         r = requests.get(url, params=params, headers=headers, timeout=12)
         r.raise_for_status()
         data = r.json()
@@ -295,14 +292,8 @@ def classify_distance(km: Optional[float]) -> str:
 # Free API: Weather (Open-Meteo)
 # -----------------------------
 @st.cache_data(show_spinner=False, ttl=60 * 60)
-def fetch_open_meteo_forecast(lat: float, lon: float, start: date, days: int) -> Optional[Dict[str, Any]]:
-    """
-    Open-Meteo free forecast is typically limited (often up to 16 days).
-    We'll request up to min(days, 16). If start is far from today, this won't be accurate—caller decides.
-    """
+def fetch_open_meteo_forecast(lat: float, lon: float, days: int) -> Optional[Dict[str, Any]]:
     try:
-        # We can only get forecast from "today"; if start date is too far, forecast won't match.
-        # We'll still fetch next N days and let UI warn.
         n = max(1, min(days, 16))
         url = "https://api.open-meteo.com/v1/forecast"
         params = {
@@ -323,12 +314,7 @@ def fetch_open_meteo_forecast(lat: float, lon: float, start: date, days: int) ->
             return None
         daily = []
         for i in range(min(len(times), len(tmax), len(tmin), len(prcp))):
-            daily.append({
-                "date": times[i],
-                "tmax": tmax[i],
-                "tmin": tmin[i],
-                "prcp": prcp[i],
-            })
+            daily.append({"date": times[i], "tmax": tmax[i], "tmin": tmin[i], "prcp": prcp[i]})
         return {"daily": daily}
     except Exception:
         return None
@@ -366,19 +352,12 @@ def fetch_open_meteo_recent_snapshot(lat: float, lon: float) -> Optional[Dict[st
 # POI via Overpass (OSM)
 # -----------------------------
 def _radius_to_bbox(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
-    # Very rough degree conversion
     lat_deg = radius_km / 110.574
     lon_deg = radius_km / (111.320 * math.cos(math.radians(lat)) + 1e-9)
     return (lat - lat_deg, lon - lon_deg, lat + lat_deg, lon + lon_deg)
 
 
 def _overpass_query_bbox(south, west, north, east) -> str:
-    # Pull common tourism & amenity POIs
-    # - tourism: attraction, museum, viewpoint
-    # - leisure: park
-    # - natural: peak, beach
-    # - amenity: restaurant, cafe, bar
-    # - historic: monument, castle
     return f"""
     [out:json][timeout:25];
     (
@@ -393,7 +372,6 @@ def _overpass_query_bbox(south, west, north, east) -> str:
 
 
 def _poi_type(tags: Dict[str, Any]) -> str:
-    # Map tags to friendly types
     if "amenity" in tags:
         v = tags["amenity"]
         if v == "restaurant":
@@ -410,9 +388,8 @@ def _poi_type(tags: Dict[str, Any]) -> str:
         if v in ["attraction", "viewpoint"]:
             return "관광"
         return "관광"
-    if "leisure" in tags:
-        if tags["leisure"] == "park":
-            return "자연"
+    if tags.get("leisure") == "park":
+        return "자연"
     if "natural" in tags:
         return "자연"
     if "historic" in tags:
@@ -422,13 +399,8 @@ def _poi_type(tags: Dict[str, Any]) -> str:
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
 def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int) -> List[Dict[str, Any]]:
-    """
-    Use Overpass API to fetch nearby POIs (nodes) within bbox.
-    Note: Overpass can be flaky; handle gracefully.
-    """
     south, west, north, east = _radius_to_bbox(lat, lon, radius_km)
     query = _overpass_query_bbox(south, west, north, east)
-
     url = "https://overpass-api.de/api/interpreter"
     try:
         r = requests.post(url, data=query.encode("utf-8"), timeout=35)
@@ -455,7 +427,6 @@ def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int) ->
                 "osm_id": el.get("id"),
             })
 
-        # de-dupe by (name, rounded lat/lon)
         seen = set()
         deduped = []
         for p in pois:
@@ -465,21 +436,19 @@ def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int) ->
             seen.add(key)
             deduped.append(p)
 
-        # limit
         return deduped[: max(0, int(limit))]
     except Exception:
         return []
 
 
 # -----------------------------
-# POI scoring and itinerary optimization
+# Itinerary optimization
 # -----------------------------
 def duration_to_days(duration: str) -> int:
     return {"당일치기": 1, "3일": 3, "5일": 5, "10일 이상": 10}.get(duration, 3)
 
 
 def poi_score(poi: Dict[str, Any], styles: List[str]) -> float:
-    # Base weights by POI type
     base = {
         "관광": 1.0,
         "문화": 1.0,
@@ -490,52 +459,31 @@ def poi_score(poi: Dict[str, Any], styles: List[str]) -> float:
         "편의": 0.3,
     }.get(poi.get("type", "관광"), 0.8)
 
-    # Style adjustments
     s = base
-    if "힐링" in styles:
-        if poi["type"] in ["자연", "카페"]:
-            s += 0.35
-    if "식도락" in styles:
-        if poi["type"] in ["맛집", "카페"]:
-            s += 0.45
-    if "유흥" in styles:
-        if poi["type"] in ["유흥"]:
-            s += 0.6
-    if "문화/예술" in styles:
-        if poi["type"] in ["문화"]:
-            s += 0.5
-    if "자연" in styles:
-        if poi["type"] in ["자연"]:
-            s += 0.45
-    if "쇼핑" in styles:
-        # OSM query didn't fetch malls by default; keep neutral
-        s += 0.05
-    if "액티비티" in styles or "테마파크" in styles:
-        # Not directly detected; keep neutral
-        s += 0.05
-    if "로드트립" in styles:
-        # encourage viewpoints/nature
-        if poi["type"] in ["자연", "관광"]:
-            s += 0.15
+    if "힐링" in styles and poi["type"] in ["자연", "카페"]:
+        s += 0.35
+    if "식도락" in styles and poi["type"] in ["맛집", "카페"]:
+        s += 0.45
+    if "유흥" in styles and poi["type"] in ["유흥"]:
+        s += 0.6
+    if "문화/예술" in styles and poi["type"] in ["문화"]:
+        s += 0.5
+    if "자연" in styles and poi["type"] in ["자연"]:
+        s += 0.45
+    if "로드트립" in styles and poi["type"] in ["자연", "관광"]:
+        s += 0.15
     return s
 
 
 def _kmeans_like(points: List[Tuple[float, float]], k: int, iters: int = 10) -> List[int]:
-    """
-    Tiny k-means-like clustering without numpy.
-    Returns cluster assignment for each point.
-    """
     if not points or k <= 1:
         return [0 for _ in points]
     k = min(k, len(points))
-
-    # init centroids: spread by picking every n-th point
     step = max(1, len(points) // k)
     centroids = [points[i] for i in range(0, len(points), step)][:k]
-
     assign = [0] * len(points)
+
     for _ in range(iters):
-        # assign
         changed = False
         for i, (x, y) in enumerate(points):
             best_c = 0
@@ -549,15 +497,12 @@ def _kmeans_like(points: List[Tuple[float, float]], k: int, iters: int = 10) -> 
                 assign[i] = best_c
                 changed = True
 
-        # recompute centroids
-        sums = [(0.0, 0.0, 0) for _ in range(k)]  # (sx, sy, cnt)
-        tmp = []
-        for c in range(k):
-            tmp.append([0.0, 0.0, 0])
+        tmp = [[0.0, 0.0, 0] for _ in range(k)]
         for i, c in enumerate(assign):
             tmp[c][0] += points[i][0]
             tmp[c][1] += points[i][1]
             tmp[c][2] += 1
+
         new_centroids = []
         for c in range(k):
             if tmp[c][2] == 0:
@@ -568,6 +513,7 @@ def _kmeans_like(points: List[Tuple[float, float]], k: int, iters: int = 10) -> 
 
         if not changed:
             break
+
     return assign
 
 
@@ -575,14 +521,19 @@ def _nearest_neighbor_order(pois: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if len(pois) <= 2:
         return pois
     remaining = pois[:]
-    # start from the most "central" (closest to mean)
     mean_lat = sum(p["lat"] for p in remaining) / len(remaining)
     mean_lon = sum(p["lon"] for p in remaining) / len(remaining)
-    start_idx = min(range(len(remaining)), key=lambda i: (remaining[i]["lat"] - mean_lat) ** 2 + (remaining[i]["lon"] - mean_lon) ** 2)
+    start_idx = min(
+        range(len(remaining)),
+        key=lambda i: (remaining[i]["lat"] - mean_lat) ** 2 + (remaining[i]["lon"] - mean_lon) ** 2
+    )
     route = [remaining.pop(start_idx)]
     while remaining:
         last = route[-1]
-        idx = min(range(len(remaining)), key=lambda i: haversine_km(last["lat"], last["lon"], remaining[i]["lat"], remaining[i]["lon"]))
+        idx = min(
+            range(len(remaining)),
+            key=lambda i: haversine_km(last["lat"], last["lon"], remaining[i]["lat"], remaining[i]["lon"])
+        )
         route.append(remaining.pop(idx))
     return route
 
@@ -593,39 +544,28 @@ def build_itinerary_from_pois(
     days: int,
     exclude_names: Optional[set] = None,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    """
-    Score POIs, select top ones, cluster into days, order each day route.
-    """
     exclude_names = exclude_names or set()
     if not pois:
         return {d: [] for d in range(1, days + 1)}
 
-    # Filter excluded
     filtered = [p for p in pois if p["name"] not in exclude_names]
-
-    # Score & select
     scored = [(poi_score(p, styles), p) for p in filtered]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Heuristic: points per day
     per_day = 5 if days >= 5 else 6
     max_pick = max(6, min(len(scored), days * per_day))
     picked = [p for _, p in scored[:max_pick]]
 
-    # Cluster into days
     points = [(p["lat"], p["lon"]) for p in picked]
     k = min(days, len(picked))
     clusters = _kmeans_like(points, k=k, iters=12)
 
     day_map: Dict[int, List[Dict[str, Any]]] = {d: [] for d in range(1, days + 1)}
-    # Map cluster id -> day number
-    # If k < days, later days empty
     for p, c in zip(picked, clusters):
         day = c + 1
         if day <= days:
             day_map[day].append(p)
 
-    # Order route each day
     for d in range(1, days + 1):
         day_map[d] = _nearest_neighbor_order(day_map[d])
 
@@ -633,7 +573,113 @@ def build_itinerary_from_pois(
 
 
 # -----------------------------
-# Budget allocation
+# NEW: Day별 이동시간(추정치) 계산
+# -----------------------------
+def infer_move_mode(styles: List[str], radius_km: float) -> str:
+    # 간단 추정 규칙
+    if "로드트립" in styles:
+        return "차량"
+    if radius_km <= 3:
+        return "도보"
+    return "대중교통"
+
+
+def move_speed_kmh(mode: str) -> float:
+    # 현실감 있는 대략치
+    return {
+        "도보": 4.5,
+        "대중교통": 18.0,  # 대기/환승 전 '주행' 기준은 더 빠르지만, 아래 오버헤드로 보정
+        "차량": 28.0,
+    }.get(mode, 18.0)
+
+
+def leg_overhead_min(mode: str) -> float:
+    # 한 구간당 고정 오버헤드(대기/출발/주차 등)
+    return {
+        "도보": 3.0,        # 신호/횡단/길찾기
+        "대중교통": 10.0,   # 대기/환승/승하차
+        "차량": 8.0,        # 주차/출발 준비
+    }.get(mode, 8.0)
+
+
+def estimate_route_time_minutes(points: List[Tuple[float, float]], mode: str, return_to_center: bool = True) -> Dict[str, Any]:
+    """
+    points: ordered route points [(lat,lon), ...]
+    center: mean point used as '대략 숙소/중심' for optional return
+    """
+    if not points or len(points) == 1:
+        return {
+            "mode": mode,
+            "total_minutes": 0,
+            "total_km": 0.0,
+            "legs": [],
+            "note": "포인트가 1개 이하라 이동시간은 사실상 0으로 처리!",
+        }
+
+    speed = move_speed_kmh(mode)
+    overhead = leg_overhead_min(mode)
+
+    lats = [p[0] for p in points]
+    lons = [p[1] for p in points]
+    center = (sum(lats) / len(lats), sum(lons) / len(lons))
+
+    legs = []
+    total_km = 0.0
+    total_min = 0.0
+
+    # legs between consecutive points
+    for i in range(len(points) - 1):
+        a = points[i]
+        b = points[i + 1]
+        km = haversine_km(a[0], a[1], b[0], b[1])
+        minutes = (km / speed) * 60.0 + overhead
+        legs.append({"from": i, "to": i + 1, "km": round(km, 2), "minutes": int(round(minutes))})
+        total_km += km
+        total_min += minutes
+
+    # optional return to center (last -> center)
+    if return_to_center:
+        last = points[-1]
+        km = haversine_km(last[0], last[1], center[0], center[1])
+        minutes = (km / speed) * 60.0 + overhead
+        legs.append({"from": len(points) - 1, "to": "center", "km": round(km, 2), "minutes": int(round(minutes))})
+        total_km += km
+        total_min += minutes
+
+    return {
+        "mode": mode,
+        "total_minutes": int(round(total_min)),
+        "total_km": round(total_km, 2),
+        "legs": legs,
+        "note": "추정치(직선거리+오버헤드)라 실제 교통/경로에 따라 달라질 수 있어요.",
+    }
+
+
+def build_day_travel_times(
+    day_map: Dict[int, List[Dict[str, Any]]],
+    styles: List[str],
+    radius_km: float,
+    move_mode_setting: str,
+    return_to_center: bool,
+) -> Dict[int, Dict[str, Any]]:
+    """
+    For each day, compute estimated travel time.
+    """
+    day_times = {}
+    inferred = infer_move_mode(styles, radius_km)
+
+    for d, pois in day_map.items():
+        pts = [(p["lat"], p["lon"]) for p in pois]
+        mode = move_mode_setting
+        if mode == "자동":
+            mode = inferred
+        day_times[d] = estimate_route_time_minutes(pts, mode=mode, return_to_center=return_to_center)
+
+    return day_times
+
+
+# -----------------------------
+# Budget allocation (still supported; travel_mode moved to sidebar)
 # -----------------------------
 def budget_tier(budget: int) -> str:
     if budget <= 0:
@@ -723,7 +769,7 @@ def build_checklist(destination_scope: str, month: str, style: List[str], party_
     if "로드트립" in style:
         packing += ["면허증(렌트 시)", "차량용 거치대/충전기"]
     if "액티비티" in style:
-        packing += ["운동화/활동복", "액션캠(선택)"]
+        packing += ["운동화/활동복"]
     if "유흥" in style:
         packing += ["편한데 예쁜(?) 옷 한 벌", "숙소 위치/귀가 루트 미리 체크"]
     if "식도락" in style:
@@ -753,13 +799,12 @@ def build_checklist(destination_scope: str, month: str, style: List[str], party_
 
 
 # -----------------------------
-# Plan building: Rule-based + POI optimized
+# Plan building
 # -----------------------------
 def plan_from_poi_daymap(dest: str, days: int, day_map: Dict[int, List[Dict[str, Any]]], styles: List[str], party: str) -> Dict[str, Any]:
     day_blocks = []
     for d in range(1, days + 1):
         pois = day_map.get(d, [])
-        # Split into AM/PM/Night
         am = pois[:2]
         pm = pois[2:4]
         night = pois[4:6]
@@ -772,27 +817,27 @@ def plan_from_poi_daymap(dest: str, days: int, day_map: Dict[int, List[Dict[str,
         am_line = f"☀️ 오전: {fmt(am)}"
         pm_line = f"🌤️ 오후: {fmt(pm)}"
         night_line = f"🌙 밤: {fmt(night)}"
-        # Style seasoning copy
         if "식도락" in styles:
             night_line += " + 야식/디저트(선택인데 사실 거의 필수)"
         if "힐링" in styles:
             am_line += " + 느긋하게(마음의 평화 우선)"
         if "유흥" in styles:
             night_line += " + 바/야경 스팟 옵션"
+
         day_blocks.append({"day": d, "title": f"Day {d}", "plan": [am_line, pm_line, night_line]})
 
     headline = f"✨ {dest} {days}일 플랜 (feat. {party} 모먼트) — 동선은 효율, 감성은 과몰입"
-    summary = "근처 POI를 자동 수집해서 ‘하루 동선’ 기준으로 묶어봤어. 너는 그냥 즐기기만 하면 됨 😎"
+    summary = "근처 POI를 자동 수집해서 ‘하루 동선’ 기준으로 묶고, 가까운 순으로 정렬했어. 너는 그냥 즐기기만 하면 됨 😎"
     return {"headline": headline, "summary": summary, "day_blocks": day_blocks, "tips": [], "sources": []}
 
 
 def build_rule_based_plan(payload: Dict[str, Any], km: Optional[float], snapshot: Optional[Dict[str, Any]], poi_daymap: Optional[Dict[int, List[Dict[str, Any]]]] = None) -> Dict[str, Any]:
     days = duration_to_days(payload["duration"])
     styles = payload.get("travel_style", [])
-    mode = payload.get("travel_mode", "자유여행")
     party = payload.get("party_type", "친구")
     budget = int(payload.get("budget", 0))
     dest = (payload.get("destination_text") or "").strip() or "어딘가 갬성 좋은 곳"
+    travel_mode = payload.get("travel_mode", "자유여행")  # from sidebar
 
     tier = budget_tier(budget)
     dist_label = classify_distance(km)
@@ -801,12 +846,11 @@ def build_rule_based_plan(payload: Dict[str, Any], km: Optional[float], snapshot
     if snapshot:
         wx_line += f" / 최근 스냅샷: 평균 {snapshot['avg_min']}~{snapshot['avg_max']}°C, 강수 {snapshot['total_prcp']}mm(7일)"
 
-    mode_line = "자유여행이면 동선 최적화가 승부!" if mode == "자유여행" else "패키지면 체력 관리가 승부!"
+    mode_line = "자유여행이면 동선 최적화가 승부!" if travel_mode == "자유여행" else "패키지면 체력 관리가 승부!"
 
     if poi_daymap:
         plan = plan_from_poi_daymap(dest, days, poi_daymap, styles, party)
     else:
-        # fallback simple
         day_blocks = []
         for d in range(1, days + 1):
             if d == 1:
@@ -815,20 +859,6 @@ def build_rule_based_plan(payload: Dict[str, Any], km: Optional[float], snapshot
                 focus = "마무리 산책 + 기념품 + 이동(체력 안배)"
             else:
                 focus = "메인 스팟 + 취향 코스 + 저녁 한 방(야경/야식 옵션)"
-
-            if "힐링" in styles:
-                focus += " + 카페/공원 힐링"
-            if "식도락" in styles:
-                focus += " + 로컬 맛집 2타임"
-            if "유흥" in styles:
-                focus += " + 밤코스(바/클럽/야경)"
-            if "로드트립" in styles:
-                focus += " + 근교 드라이브"
-            if "문화/예술" in styles:
-                focus += " + 전시/공연"
-            if "자연" in styles:
-                focus += " + 자연 스팟"
-
             day_blocks.append({
                 "day": d,
                 "title": f"Day {d}",
@@ -838,7 +868,6 @@ def build_rule_based_plan(payload: Dict[str, Any], km: Optional[float], snapshot
                     "🌙 밤: 숙소 복귀 전 ‘오늘의 베스트 컷’ 저장 📸",
                 ],
             })
-
         plan = {
             "headline": f"✨ {dest} {days}일 플랜 (feat. {party} 모먼트) — 계획은 깔끔, 감성은 꽉",
             "summary": f"{dest}에서 {days}일 동안 {', '.join(styles) if styles else '취향저격'}으로 즐기는 플랜! 무리하지 말고 ‘꾸준히’ 즐기자 😎",
@@ -859,7 +888,7 @@ def build_rule_based_plan(payload: Dict[str, Any], km: Optional[float], snapshot
 
 
 # -----------------------------
-# OpenAI planner (optional): web_search + sources (best effort)
+# OpenAI planner (optional)
 # -----------------------------
 def call_openai_plan(openai_api_key: str, payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if OpenAI is None:
@@ -927,7 +956,6 @@ def call_openai_plan(openai_api_key: str, payload: Dict[str, Any]) -> Tuple[Opti
     if plan is None or not isinstance(plan, dict):
         return None, "계획 JSON 파싱 실패(모델 출력 형식 흔들림)"
 
-    # augment sources (best effort)
     sources = plan.get("sources", [])
     if not isinstance(sources, list):
         sources = []
@@ -990,10 +1018,6 @@ def apply_itinerary_edits(plan: Dict[str, Any]) -> Dict[str, Any]:
 # Exports: ICS + PDF
 # -----------------------------
 def make_ics(bundle: Dict[str, Any]) -> str:
-    """
-    Create a simple ICS calendar with one event per day (all-day),
-    using start_date as anchor.
-    """
     payload = bundle.get("payload", {})
     plan = bundle.get("plan", {})
     start: date = payload.get("start_date_obj") or date.today()
@@ -1037,10 +1061,6 @@ def make_ics(bundle: Dict[str, Any]) -> str:
 
 
 def make_pdf_bytes(bundle: Dict[str, Any]) -> Optional[bytes]:
-    """
-    Create a neat PDF using reportlab, returns bytes.
-    If reportlab not installed, returns None.
-    """
     if rl_canvas is None or A4 is None or mm is None:
         return None
 
@@ -1087,7 +1107,6 @@ def make_pdf_bytes(bundle: Dict[str, Any]) -> Optional[bytes]:
     month = payload.get("travel_month", "")
     duration = payload.get("duration", "")
     party = f"{payload.get('party_count', '')}명 · {payload.get('party_type', '')}"
-    mode = payload.get("travel_mode", "")
     budget = payload.get("budget", 0)
     start_date_str = payload.get("start_date", "")
 
@@ -1100,9 +1119,9 @@ def make_pdf_bytes(bundle: Dict[str, Any]) -> Optional[bytes]:
         f"Start date: {start_date_str}",
         f"Duration: {duration}",
         f"Party: {party}",
-        f"Mode: {mode}",
         f"Budget: {budget:,} KRW" if isinstance(budget, int) else f"Budget: {budget}",
         f"Distance: {meta.get('distance_comment','')}",
+        f"Move mode: {meta.get('move_mode_used','')}",
     ], y)
 
     y -= 4 * mm
@@ -1114,6 +1133,17 @@ def make_pdf_bytes(bundle: Dict[str, Any]) -> Optional[bytes]:
     draw_section("Summary", y)
     y -= 6 * mm
     y = draw_bullets([plan.get("summary", "")], y)
+
+    # Day travel time
+    day_times = meta.get("day_travel_times", {}) or {}
+    y -= 2 * mm
+    draw_section("Estimated Travel Time (per day)", y)
+    y -= 6 * mm
+    day_lines = []
+    for d in sorted(day_times.keys()):
+        info = day_times[d]
+        day_lines.append(f"Day {d}: {info.get('total_minutes',0)} min, {info.get('total_km',0)} km ({info.get('mode','')})")
+    y = draw_bullets(day_lines if day_lines else ["(no data)"], y)
 
     y -= 2 * mm
     draw_section("Day-by-Day", y)
@@ -1160,8 +1190,6 @@ def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
         return
 
     layers = []
-
-    # destination pin
     dest_data = [{"lat": dest_geo["lat"], "lon": dest_geo["lon"], "name": dest_geo.get("display_name", "Destination"), "kind": "DEST"}]
     layers.append(
         pdk.Layer(
@@ -1173,7 +1201,6 @@ def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
         )
     )
 
-    # POI points
     if pois:
         poi_data = [{"lat": p["lat"], "lon": p["lon"], "name": p["name"], "kind": p["type"]} for p in pois]
         layers.append(
@@ -1198,8 +1225,8 @@ def render_header():
     st.markdown(CSS, unsafe_allow_html=True)
     st.markdown(
         f"""
-        <div class="tm-title">{APP_NAME}<span class="tm-badge">all-in-one trip OS</span></div>
-        <div class="tm-subtitle">여행 계획? 이제 “대충” 말고 “자동 최적화”로 간다 😎 (근데 말투는 힙하게)</div>
+        <div class="tm-title">{APP_NAME}<span class="tm-badge">trip optimizer</span></div>
+        <div class="tm-subtitle">“질문 화면”은 가볍게, 결과는 묵직하게 😎 (동선+이동시간까지 추정해줌)</div>
         """,
         unsafe_allow_html=True,
     )
@@ -1207,7 +1234,7 @@ def render_header():
 
 def render_sidebar():
     st.sidebar.markdown("### 🔑 OpenAI API Key")
-    st.sidebar.caption("키는 세션에만 저장돼요(서버 저장 X). 없으면 룰베이스 + POI 최적화로 갑니다.")
+    st.sidebar.caption("키는 세션에만 저장(서버 저장 X). 없으면 POI 최적화 룰베이스로 갑니다.")
     st.session_state.openai_api_key = st.sidebar.text_input(
         "OPENAI_API_KEY",
         type="password",
@@ -1220,7 +1247,7 @@ def render_sidebar():
     st.session_state.start_city = st.sidebar.text_input("출발 도시", value=st.session_state.get("start_city", "서울"))
 
     st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🗓️ 시작 날짜(정확한 날씨/캘린더/ICS용)")
+    st.sidebar.markdown("### 🗓️ 시작 날짜(예보/ICS용)")
     st.session_state.start_date = st.sidebar.date_input("여행 시작일", value=st.session_state.get("start_date", date.today()))
 
     st.sidebar.markdown("---")
@@ -1234,19 +1261,25 @@ def render_sidebar():
     )
 
     st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🚶 Day 이동시간 추정 설정")
+    st.session_state.move_mode = st.sidebar.selectbox("이동수단", ["자동", "도보", "대중교통", "차량"], index=["자동", "도보", "대중교통", "차량"].index(st.session_state.get("move_mode", "자동")))
+    st.session_state.include_return_to_center = st.sidebar.toggle("하루 마지막에 중심(대략 숙소) 복귀 포함", value=st.session_state.get("include_return_to_center", True))
+
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🧳 (선택) 여행 형태(예산 분배용)")
+    st.session_state.travel_mode_sidebar = st.sidebar.selectbox(
+        "여행 형태",
+        ["자유여행", "패키지여행"],
+        index=["자유여행", "패키지여행"].index(st.session_state.get("travel_mode_sidebar", "자유여행")),
+    )
+    st.sidebar.caption("요청대로 1페이지에서 질문은 삭제했지만, 예산 분배/팁용으로 사이드바에만 남겨뒀어!")
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚙️ 확장 UI 토글")
     st.session_state.show_map = st.sidebar.toggle("지도 표시", value=st.session_state.get("show_map", True))
     st.session_state.enable_edit = st.sidebar.toggle("일정 편집 모드", value=st.session_state.get("enable_edit", True))
     st.session_state.show_budget = st.sidebar.toggle("예산 분배 표시", value=st.session_state.get("show_budget", True))
     st.session_state.show_checklist = st.sidebar.toggle("체크리스트 표시", value=st.session_state.get("show_checklist", True))
-
-    st.sidebar.markdown("---")
-    st.sidebar.markdown("### 🪄 사용 팁")
-    st.sidebar.write(
-        "• POI는 무료(OSM)라 ‘가끔 누락/잡음’ 있음 → 필터/제외로 정리\n"
-        "• 일정 자동 최적화는 ‘하루 동선’ 기준으로 묶고, 가까운 순으로 정렬\n"
-        "• PDF/ICS/JSON으로 바로 내보내기까지 끝"
-    )
 
 
 # -----------------------------
@@ -1257,7 +1290,7 @@ def page1():
         """
         <div class="tm-card">
           <h3>1) 기본 정보부터 ‘쓱’ 수집 📝</h3>
-          <div class="tm-tip">너의 여행 DNA를 알아야… 내가 동선을 미친 듯이 최적화하지 😌</div>
+          <div class="tm-tip">딱 필요한 것만 묻는다. 질문 많으면 피곤한 거 알지? 😌</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1279,11 +1312,6 @@ def page1():
             "관계",
             ["친구", "연인", "부모님", "가족", "혼자", "직장동료", "기타"],
             index=["친구", "연인", "부모님", "가족", "혼자", "직장동료", "기타"].index(st.session_state.party_type),
-        )
-        st.session_state.travel_mode = st.selectbox(
-            "희망 여행 방식",
-            ["자유여행", "패키지여행"],
-            index=["자유여행", "패키지여행"].index(st.session_state.travel_mode),
         )
 
     st.markdown(
@@ -1327,24 +1355,13 @@ def page2():
         unsafe_allow_html=True,
     )
 
+    # distance_pref removed
     c1, c2 = st.columns(2)
     with c1:
-        st.session_state.distance_pref = st.selectbox(
-            "여행지와의 거리 선호",
-            ["단거리", "장거리", "상관없음"],
-            index=["단거리", "장거리", "상관없음"].index(st.session_state.distance_pref),
-        )
         st.session_state.duration = st.selectbox(
             "여행 일정",
             ["당일치기", "3일", "5일", "10일 이상"],
             index=["당일치기", "3일", "5일", "10일 이상"].index(st.session_state.duration),
-        )
-
-    with c2:
-        st.session_state.travel_style = st.multiselect(
-            "여행 스타일(복수 선택 가능)",
-            ["힐링", "식도락", "유흥", "로드트립", "액티비티", "쇼핑", "문화/예술", "자연", "테마파크"],
-            default=st.session_state.travel_style,
         )
         st.session_state.budget = st.number_input(
             "예상 예산(원)",
@@ -1354,17 +1371,24 @@ def page2():
             step=50000,
         )
 
+    with c2:
+        st.session_state.travel_style = st.multiselect(
+            "여행 스타일(복수 선택 가능)",
+            ["힐링", "식도락", "유흥", "로드트립", "액티비티", "쇼핑", "문화/예술", "자연", "테마파크"],
+            default=st.session_state.travel_style,
+        )
+
     nav = st.columns([1, 1, 2])
     with nav[0]:
         if st.button("👈 이전", use_container_width=True):
             st.session_state.step = 1
     with nav[2]:
-        if st.button("여행 계획 뽑기 ✨ (올인원)", use_container_width=True):
+        if st.button("여행 계획 뽑기 ✨ (이동시간까지)", use_container_width=True):
             st.session_state.step = 3
 
 
 # -----------------------------
-# Bundle generation (the all-in-one brain)
+# Bundle generation
 # -----------------------------
 def build_payload() -> Dict[str, Any]:
     return {
@@ -1373,37 +1397,26 @@ def build_payload() -> Dict[str, Any]:
         "party_type": st.session_state.party_type,
         "destination_scope": st.session_state.destination_scope,
         "destination_text": st.session_state.destination_text,
-        "travel_mode": st.session_state.travel_mode,
-        "distance_pref": st.session_state.distance_pref,
         "duration": st.session_state.duration,
         "travel_style": st.session_state.travel_style,
         "budget": int(st.session_state.budget),
         "start_city": st.session_state.start_city,
         "start_date": st.session_state.start_date.isoformat(),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        # internal helper
+
+        # internal helpers
         "start_date_obj": st.session_state.start_date,
+        "travel_mode": st.session_state.travel_mode_sidebar,  # moved to sidebar
     }
 
 
 def payload_signature(payload: Dict[str, Any]) -> str:
-    # Convert to stable string signature for caching
     copy = dict(payload)
-    # remove non-serializable
     copy.pop("start_date_obj", None)
     return json.dumps(copy, ensure_ascii=False, sort_keys=True)
 
 
 def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
-    """
-    Generates:
-    - geocodes
-    - distance
-    - weather snapshot + (if feasible) forecast list
-    - POIs via Overpass (filtered + user excluded)
-    - POI day itinerary optimization
-    - plan: OpenAI optional, otherwise rule-based that uses POI itinerary
-    """
     payload = build_payload()
     sig = payload_signature(payload)
 
@@ -1422,20 +1435,20 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         km = haversine_km(start_geo["lat"], start_geo["lon"], dest_geo["lat"], dest_geo["lon"])
         distance_comment = f"{km:,.0f} km · {classify_distance(km)}"
 
-    # Weather
-    snapshot = fetch_open_meteo_recent_snapshot(dest_geo["lat"], dest_geo["lon"]) if dest_geo else None
     days = duration_to_days(payload["duration"])
+
+    snapshot = fetch_open_meteo_recent_snapshot(dest_geo["lat"], dest_geo["lon"]) if dest_geo else None
     forecast = None
     forecast_note = None
 
-    # If start_date is within next ~16 days, show forecast (best effort)
+    # forecast window check (rough)
     start_d: date = payload["start_date_obj"]
     delta = (start_d - date.today()).days
     if dest_geo and -1 <= delta <= 15:
-        forecast = fetch_open_meteo_forecast(dest_geo["lat"], dest_geo["lon"], start_d, days)
-        forecast_note = "시작일이 가까워서(±16일) 예보 기반으로 표시했어. (정확도: 날씨앱급)"
+        forecast = fetch_open_meteo_forecast(dest_geo["lat"], dest_geo["lon"], days)
+        forecast_note = "시작일이 가까워서(±16일) 예보 기반으로 표시했어."
     else:
-        forecast_note = "시작일이 예보 범위 밖이라, ‘최근 스냅샷 + 월 힌트’로 감 잡기 모드!"
+        forecast_note = "시작일이 예보 범위 밖이라 ‘최근 스냅샷 + 월 힌트’로 감 잡기 모드!"
 
     # POIs
     pois_all = []
@@ -1447,35 +1460,61 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
             limit=int(st.session_state.poi_limit),
         )
 
-    # Filter by POI type selector
     allowed_types = set(st.session_state.poi_types or [])
     pois_filtered = [p for p in pois_all if (p.get("type") in allowed_types)] if allowed_types else pois_all
 
-    # User excluded POIs
     exclude_names = set(st.session_state.poi_user_exclude or set())
     styles = payload.get("travel_style", [])
     poi_daymap = build_itinerary_from_pois(pois_filtered, styles, days=days, exclude_names=exclude_names)
 
-    # Plan selection: OpenAI optional
+    # NEW: day travel time estimation
+    move_mode_setting = st.session_state.move_mode
+    day_travel_times = build_day_travel_times(
+        poi_daymap,
+        styles=styles,
+        radius_km=float(st.session_state.poi_radius_km),
+        move_mode_setting=move_mode_setting,
+        return_to_center=bool(st.session_state.include_return_to_center),
+    )
+    # Mode used in most days (summary)
+    mode_used = None
+    if day_travel_times:
+        mode_used = day_travel_times.get(1, {}).get("mode") or None
+
+    # OpenAI optional
     err = None
     openai_key = (st.session_state.get("openai_api_key") or "").strip()
     plan = None
 
-    # Provide richer payload to OpenAI, including POIs + weather context (but keep it compact)
     enriched_payload = dict(payload)
+    enriched_payload.pop("start_date_obj", None)
     enriched_payload["distance_km_estimate"] = km
     enriched_payload["distance_comment"] = distance_comment
     enriched_payload["weather_snapshot"] = snapshot
     enriched_payload["weather_forecast_daily"] = forecast.get("daily") if forecast else None
     enriched_payload["poi_sample"] = [{"name": p["name"], "type": p["type"]} for p in pois_filtered[:25]]
-    enriched_payload["poi_strategy_note"] = "POI는 OpenStreetMap 기반 자동 수집이며 누락/잡음이 있을 수 있음."
+    enriched_payload["estimated_day_travel_times"] = {
+        str(d): {
+            "mode": info.get("mode"),
+            "total_minutes": info.get("total_minutes"),
+            "total_km": info.get("total_km"),
+        } for d, info in day_travel_times.items()
+    }
+    enriched_payload["note"] = "이동시간은 직선거리+오버헤드 기반 추정치임(실제 경로/교통상황과 다를 수 있음)."
 
     if openai_key:
         plan, err = call_openai_plan(openai_key, enriched_payload)
 
-    # If AI plan not available, use POI optimized rule-based plan
     if not plan:
         plan = build_rule_based_plan(payload, km=km, snapshot=snapshot, poi_daymap=poi_daymap)
+
+    # Attach travel time summary into tips (so it shows even in AI plan)
+    # We'll add a compact tip: Day1 total + average.
+    totals = [v.get("total_minutes", 0) for v in day_travel_times.values() if isinstance(v, dict)]
+    if totals:
+        avg_min = int(round(sum(totals) / len(totals)))
+        plan.setdefault("tips", [])
+        plan["tips"].insert(0, f"⏱️ 이동시간(추정): Day1 {day_travel_times.get(1,{}).get('total_minutes',0)}분 / 평균 {avg_min}분 (이동수단: {mode_used or '자동'})")
 
     meta = {
         "dest_geo": dest_geo,
@@ -1487,6 +1526,9 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         "weather_note": forecast_note,
         "poi_total": len(pois_all),
         "poi_used": len(pois_filtered),
+        "day_travel_times": day_travel_times,
+        "move_mode_setting": move_mode_setting,
+        "move_mode_used": mode_used or (infer_move_mode(styles, float(st.session_state.poi_radius_km)) if move_mode_setting == "자동" else move_mode_setting),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -1501,7 +1543,7 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
 
     st.session_state.last_payload_sig = sig
     st.session_state.last_bundle = bundle
-    st.session_state.itinerary_edits = {}  # reset edits seed on new plan
+    st.session_state.itinerary_edits = {}
 
     return bundle, err
 
@@ -1513,14 +1555,14 @@ def page3():
     st.markdown(
         """
         <div class="tm-card">
-          <h3>올인원 결과 나왔다 🧾✨</h3>
-          <div class="tm-tip">이제 너는 “여행 계획 있는 사람”이다. (자동최적화까지 달았으니 거의 치트키)</div>
+          <h3>결과 나왔다 🧾✨</h3>
+          <div class="tm-tip">동선도 짰고, 이제 “이동시간(추정)”까지 깔끔하게 잡아줄게 😎</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    with st.spinner("플랜 생성 중… (POI 수집 → 동선 최적화 → 일정 구성 → 내보내기까지 한 번에)"):
+    with st.spinner("플랜 생성 중… (POI 수집 → 동선 최적화 → 이동시간 추정 → 일정 구성)"):
         bundle, err = generate_bundle()
 
     payload = bundle["payload"]
@@ -1528,6 +1570,7 @@ def page3():
     plan = bundle["plan"]
     pois = bundle["pois"]
     poi_daymap = bundle["poi_daymap"]
+    day_times = meta.get("day_travel_times", {}) or {}
 
     if err:
         st.warning(f"OpenAI 쪽은 실패했지만, 플랜은 POI 최적화 룰베이스로 완주했어 🛟\n\n사유: {err}")
@@ -1537,7 +1580,7 @@ def page3():
     styles = payload.get("travel_style", [])
     days = duration_to_days(payload["duration"])
 
-    # Input summary
+    # Summary
     st.markdown(
         f"""
         <div class="tm-card">
@@ -1547,11 +1590,11 @@ def page3():
             • 시작일: <b>{payload["start_date"]}</b><br/>
             • 인원/관계: <b>{payload["party_count"]}명 · {payload["party_type"]}</b><br/>
             • 여행지: <b>{payload["destination_scope"]} · {dest_name}</b><br/>
-            • 방식: <b>{payload["travel_mode"]}</b><br/>
-            • 거리 선호: <b>{payload["distance_pref"]}</b> (참고: {meta.get("distance_comment","")})<br/>
             • 일정: <b>{payload["duration"]}</b><br/>
             • 스타일: <b>{", ".join(styles) if styles else "선택없음(=만능 캐릭터)"}</b><br/>
             • 예산: <b>{payload["budget"]:,}원</b><br/>
+            • 출발지 기준 거리: <b>{meta.get("distance_comment","")}</b><br/>
+            • 이동수단(시간추정): <b>{meta.get("move_mode_used","")}</b><br/>
             <span class="tm-micro">* 시즌 힌트: {month_hint(payload["travel_month"])}</span>
           </div>
         </div>
@@ -1573,12 +1616,12 @@ def page3():
             st.write(f"  - {d['date']}: {d['tmin']}~{d['tmax']}°C, 강수 {d['prcp']}mm")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Tabs: Plan / Map+POI / Budget / Checklist / Exports
-    tab_plan, tab_poi, tab_budget, tab_check, tab_export = st.tabs(
-        ["🧾 플랜", "🗺️ 지도+POI", "💸 예산", "✅ 체크리스트", "📤 내보내기"]
+    # Tabs
+    tab_plan, tab_move, tab_poi, tab_budget, tab_check, tab_export = st.tabs(
+        ["🧾 플랜", "⏱️ 이동시간", "🗺️ 지도+POI", "💸 예산", "✅ 체크리스트", "📤 내보내기"]
     )
 
-    # ----------------- PLAN TAB -----------------
+    # PLAN
     with tab_plan:
         st.markdown(
             f"""
@@ -1594,7 +1637,7 @@ def page3():
         ensure_itinerary_edits(days, plan)
 
         if st.session_state.get("enable_edit", True):
-            st.caption("편집 모드 ON ✅  (오전/오후/밤을 바꿔서 ‘내 플랜’으로 커스터마이징)")
+            st.caption("편집 모드 ON ✅ (오전/오후/밤을 바꿔서 ‘내 플랜’로 커스터마이징)")
             for d in range(1, days + 1):
                 with st.expander(f"Day {d} 편집하기", expanded=(d == 1)):
                     ed = st.session_state.itinerary_edits.get(d, {"am": "", "pm": "", "night": ""})
@@ -1602,7 +1645,6 @@ def page3():
                     ed["pm"] = st.text_input(f"Day {d} - 오후", value=ed["pm"], key=f"edit_pm_{d}")
                     ed["night"] = st.text_input(f"Day {d} - 밤", value=ed["night"], key=f"edit_night_{d}")
                     st.session_state.itinerary_edits[d] = ed
-
             final_plan = apply_itinerary_edits(plan)
         else:
             final_plan = plan
@@ -1613,6 +1655,15 @@ def page3():
             title = b.get("title", f"Day {day}")
             items = b.get("plan", [])
             with st.expander(f"{title} (Day {day})", expanded=(str(day) == "1")):
+                # show day travel time on top
+                try:
+                    dnum = int(day)
+                except Exception:
+                    dnum = None
+                if dnum and dnum in day_times:
+                    info = day_times[dnum]
+                    st.write(f"**⏱️ 이동시간 추정:** {info.get('total_minutes',0)}분 · {info.get('total_km',0)}km · {info.get('mode','')}")
+                    st.caption(info.get("note", ""))
                 for it in items:
                     st.write(f"- {it}")
 
@@ -1624,7 +1675,6 @@ def page3():
                 st.write(f"- {t}")
             st.markdown('</div>', unsafe_allow_html=True)
 
-        # Sources
         st.markdown('<div class="tm-section-title">🔎 Sources (AI가 참고한 곳)</div>', unsafe_allow_html=True)
         st.markdown('<div class="tm-card">', unsafe_allow_html=True)
         sources = final_plan.get("sources", []) or []
@@ -1634,20 +1684,48 @@ def page3():
                     t = s.get("title", "source")
                     u = s.get("url", "")
                     note = s.get("note", "")
-                    if u:
-                        st.write(f"- {t} — {u}" + (f" ({note})" if note else ""))
-                    else:
-                        st.write(f"- {t}" + (f" ({note})" if note else ""))
+                    st.write(f"- {t} — {u}" + (f" ({note})" if note else ""))
                 else:
                     st.write(f"- {s}")
         else:
             st.write("- (OpenAI 키 없이 생성했거나, 모델이 출처를 못 가져온 경우 비어있을 수 있어요.)")
         st.markdown('</div>', unsafe_allow_html=True)
 
-        # store final_plan back into bundle for exports
+        # store final_plan for exports
         bundle["plan"] = final_plan
 
-    # ----------------- POI TAB -----------------
+    # MOVE TIME
+    with tab_move:
+        st.markdown(
+            """
+            <div class="tm-card">
+              <div class="tm-section-title">⏱️ Day별 이동시간(추정치)</div>
+              <div class="tm-tip">직선거리(POI 간) + 구간별 오버헤드(대기/주차/신호)로 계산한 “대충 현실적인” 추정치야.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if not day_times:
+            st.info("이동시간을 계산할 POI가 부족해요. (목적지/POI 상태 확인 or 반경/POI 수 늘려봐!)")
+        else:
+            for d in range(1, days + 1):
+                info = day_times.get(d, {"total_minutes": 0, "total_km": 0, "mode": "", "legs": []})
+                with st.expander(f"Day {d} — {info.get('total_minutes',0)}분 · {info.get('total_km',0)}km · {info.get('mode','')}", expanded=(d == 1)):
+                    st.caption(info.get("note", ""))
+                    legs = info.get("legs", [])
+                    if not legs:
+                        st.write("- (이동 구간 없음)")
+                    else:
+                        st.write("- 구간별(추정):")
+                        for lg in legs:
+                            to = lg["to"]
+                            to_label = f"POI#{to+1}" if isinstance(to, int) else "center(대략 숙소)"
+                            frm = lg["from"]
+                            frm_label = f"POI#{frm+1}" if isinstance(frm, int) else str(frm)
+                            st.write(f"  - {frm_label} → {to_label}: {lg['km']}km / {lg['minutes']}분")
+
+    # POI
     with tab_poi:
         st.markdown(
             f"""
@@ -1668,13 +1746,12 @@ def page3():
             render_map(dest_geo, pois)
             st.markdown("</div>", unsafe_allow_html=True)
 
-        # POI list with exclude toggles
         st.markdown('<div class="tm-section-title">🧹 POI 정리(원치 않는 곳 제외)</div>', unsafe_allow_html=True)
         st.markdown('<div class="tm-card">', unsafe_allow_html=True)
+
         if not pois:
-            st.info("POI를 못 가져왔어… (목적지 좌표/Overpass 상태를 확인해줘). 그래도 플랜은 계속 가능!")
+            st.info("POI를 못 가져왔어… (목적지 좌표/Overpass 상태 확인). 그래도 플랜은 계속 가능!")
         else:
-            # show in a compact table-like format
             cols = st.columns([3, 1, 1, 1])
             cols[0].markdown("**이름**")
             cols[1].markdown("**타입**")
@@ -1685,7 +1762,6 @@ def page3():
             center_lat = dest_geo["lat"] if dest_geo else pois[0]["lat"]
             center_lon = dest_geo["lon"] if dest_geo else pois[0]["lon"]
 
-            # limit UI rows
             display_n = min(len(pois), 60)
             for i in range(display_n):
                 p = pois[i]
@@ -1702,12 +1778,10 @@ def page3():
                 row[3].write(f"{dist:.1f}km")
 
             st.session_state.poi_user_exclude = exclude_set
-
-            st.caption("제외 변경 후 ‘다시 뽑기 🔄’ 누르면 일정/동선이 새로 최적화돼요.")
+            st.caption("제외 변경 후 ‘내보내기 탭’ 또는 아래 ‘재최적화’ 버튼으로 일정/이동시간이 새로 계산돼요.")
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # Show POI daymap summary
-        st.markdown('<div class="tm-section-title">🧠 자동 동선 묶기(일자별 POI)</div>', unsafe_allow_html=True)
+        st.markdown('<div class="tm-section-title">🧠 일자별 POI(자동 묶기)</div>', unsafe_allow_html=True)
         st.markdown('<div class="tm-card">', unsafe_allow_html=True)
         for d in range(1, days + 1):
             day_pois = poi_daymap.get(d, [])
@@ -1717,10 +1791,14 @@ def page3():
                 st.write(f"- Day {d}: (POI 부족/제외됨) — 여유코스/휴식/근처 산책 추천")
         st.markdown("</div>", unsafe_allow_html=True)
 
-    # ----------------- BUDGET TAB -----------------
+        if st.button("POI 제외 반영 + 일정/이동시간 재최적화 🔄", use_container_width=True):
+            st.session_state.last_payload_sig = None
+            st.rerun()
+
+    # Budget
     with tab_budget:
         if st.session_state.get("show_budget", True):
-            alloc = allocate_budget(int(payload["budget"]), payload["travel_mode"], styles)
+            alloc = allocate_budget(int(payload["budget"]), payload.get("travel_mode", "자유여행"), styles)
             st.markdown('<div class="tm-card">', unsafe_allow_html=True)
             st.markdown('<div class="tm-section-title">💸 예산 분배(추천)</div>', unsafe_allow_html=True)
             st.write(f"- 예산 무드: **{budget_tier(int(payload['budget']))}**")
@@ -1731,7 +1809,7 @@ def page3():
         else:
             st.info("사이드바에서 ‘예산 분배 표시’를 켜면 나와요.")
 
-    # ----------------- CHECKLIST TAB -----------------
+    # Checklist
     with tab_check:
         if st.session_state.get("show_checklist", True):
             checklist = build_checklist(payload["destination_scope"], payload["travel_month"], styles, payload["party_type"])
@@ -1748,7 +1826,7 @@ def page3():
         else:
             st.info("사이드바에서 ‘체크리스트 표시’를 켜면 나와요.")
 
-    # ----------------- EXPORT TAB -----------------
+    # Export
     with tab_export:
         st.markdown(
             """
@@ -1760,7 +1838,6 @@ def page3():
             unsafe_allow_html=True,
         )
 
-        # JSON
         export_bundle = {
             "app": APP_NAME,
             "payload": {k: v for k, v in payload.items() if k != "start_date_obj"},
@@ -1779,7 +1856,6 @@ def page3():
             use_container_width=True,
         )
 
-        # ICS
         ics_text = make_ics({"payload": payload, "plan": bundle["plan"], "meta": meta, "exported_at": export_bundle["exported_at"]})
         st.download_button(
             "🗓️ ICS(캘린더) 다운로드",
@@ -1789,7 +1865,6 @@ def page3():
             use_container_width=True,
         )
 
-        # PDF
         pdf_bytes = make_pdf_bytes({"payload": payload, "plan": bundle["plan"], "meta": meta, "exported_at": export_bundle["exported_at"]})
         if pdf_bytes is None:
             st.info("PDF 내보내기는 `reportlab` 설치가 필요해요: `pip install reportlab`")
@@ -1802,13 +1877,7 @@ def page3():
                 use_container_width=True,
             )
 
-        st.markdown("---")
-        st.markdown("#### 🔄 POI 제외 반영해서 다시 최적화하기")
-        if st.button("POI 제외 반영 + 일정 재최적화 🔄", use_container_width=True):
-            st.session_state.last_payload_sig = None
-            st.rerun()
-
-    # Bottom navigation
+    # Navigation
     nav = st.columns([1, 1, 2])
     with nav[0]:
         if st.button("👈 입력 수정", use_container_width=True):
