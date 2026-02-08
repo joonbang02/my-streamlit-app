@@ -806,7 +806,7 @@ def call_openai_plan(openai_api_key: str, payload: Dict[str, Any]) -> Tuple[Opti
     except Exception as e:
         return None, f"OpenAI 클라이언트 초기화 실패: {e}"
 
-    model = "gpt-5.2"
+    model = "gpt-4o-mini"
 
     instructions = (
         "너는 ‘Travel-Maker’ 여행 플래너 AI야.\n"
@@ -1793,4 +1793,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
