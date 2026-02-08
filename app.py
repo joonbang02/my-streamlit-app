@@ -347,53 +347,45 @@ def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int):
             r = requests.post(url, data=query.encode("utf-8"), timeout=35)
             r.raise_for_status()
             data = r.json()
+            elements = data.get("elements", []) or []
 
-            elements = data.get("elements", [])
             pois = []
-
             for el in elements:
-                tags = el.get("tags", {})
+                tags = el.get("tags", {}) or {}
                 name = tags.get("name")
                 if not name:
                     continue
 
-                lat_p = el.get("lat") or el.get("center", {}).get("lat")
-                lon_p = el.get("lon") or el.get("center", {}).get("lon")
-                if lat_p is None or lon_p is None:
+                plat = el.get("lat") or (el.get("center", {}) or {}).get("lat")
+                plon = el.get("lon") or (el.get("center", {}) or {}).get("lon")
+                if plat is None or plon is None:
                     continue
 
                 pois.append({
                     "name": name,
-                    "lat": float(lat_p),
-                    "lon": float(lon_p),
+                    "lat": float(plat),
+                    "lon": float(plon),
                     "type": _poi_type(tags),
                     "tags": tags,
                     "osm_id": el.get("id"),
                 })
 
-            return pois[:limit]
+            # ✅ 중복 제거는 try 블록 안
+            seen = set()
+            deduped = []
+            for p in pois:
+                key = (p["name"], round(p["lat"], 5), round(p["lon"], 5))
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(p)
+
+            return deduped[: max(0, int(limit))]
 
         except Exception:
-            # 이 서버 실패 → 다음 서버 시도
             continue
 
-    # 모든 서버 실패
     return []
-
-
-        seen = set()
-        deduped = []
-        for p in pois:
-            key = (p["name"], round(p["lat"], 5), round(p["lon"], 5))
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(p)
-
-        return deduped[: max(0, int(limit))]
-    except Exception:
-        return []
-
 
 def duration_to_days(duration: str) -> int:
     return {"당일치기": 1, "3일": 3, "5일": 5, "10일 이상": 10}.get(duration, 3)
@@ -1820,6 +1812,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
