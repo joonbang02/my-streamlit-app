@@ -9,6 +9,13 @@ import requests
 import streamlit as st
 import pydeck as pdk
 
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.nchc.org.tw/api/interpreter",
+]
+
+
 try:
     from openai import OpenAI
 except Exception:
@@ -152,7 +159,7 @@ def init_state():
         "show_budget": True,
         "show_checklist": True,
         "enable_edit": True,
-        "poi_radius_km": 5,
+        "poi_radius_km": 8,
         "poi_limit": 50,
         "poi_types": ["관광", "맛집", "카페", "자연", "문화"],
         "last_payload_sig": None,
@@ -331,36 +338,48 @@ def _poi_type(tags: Dict[str, Any]) -> str:
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int) -> List[Dict[str, Any]]:
+def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int):
     south, west, north, east = _radius_to_bbox(lat, lon, radius_km)
     query = _overpass_query_bbox(south, west, north, east)
-    url = "https://overpass-api.de/api/interpreter"
-    try:
-        r = requests.post(url, data=query.encode("utf-8"), timeout=35)
-        r.raise_for_status()
-        data = r.json()
-        elements = data.get("elements", []) or []
-        pois = []
-        for el in elements:
-            tags = el.get("tags", {}) or {}
-            name = tags.get("name")
-            if not name:
-                continue
-            plat = el.get("lat") or (el.get("center", {}) or {}).get("lat")
-            plon = el.get("lon") or (el.get("center", {}) or {}).get("lon")
-            if plat is None or plon is None:
-                continue
-            ptype = _poi_type(tags)
-            pois.append(
-                {
+
+    for url in OVERPASS_URLS:
+        try:
+            r = requests.post(url, data=query.encode("utf-8"), timeout=35)
+            r.raise_for_status()
+            data = r.json()
+
+            elements = data.get("elements", [])
+            pois = []
+
+            for el in elements:
+                tags = el.get("tags", {})
+                name = tags.get("name")
+                if not name:
+                    continue
+
+                lat_p = el.get("lat") or el.get("center", {}).get("lat")
+                lon_p = el.get("lon") or el.get("center", {}).get("lon")
+                if lat_p is None or lon_p is None:
+                    continue
+
+                pois.append({
                     "name": name,
-                    "lat": float(plat),
-                    "lon": float(plon),
-                    "type": ptype,
+                    "lat": float(lat_p),
+                    "lon": float(lon_p),
+                    "type": _poi_type(tags),
                     "tags": tags,
                     "osm_id": el.get("id"),
-                }
-            )
+                })
+
+            return pois[:limit]
+
+        except Exception:
+            # 이 서버 실패 → 다음 서버 시도
+            continue
+
+    # 모든 서버 실패
+    return []
+
 
         seen = set()
         deduped = []
@@ -1323,6 +1342,11 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
     dest_text = (payload.get("destination_text") or "").strip()
     start_text = (payload.get("start_city") or "").strip()
 
+    # 해외인데 도시 힌트가 없으면 강제로 city 힌트 추가 (국가 중심 방지)
+    if payload.get("destination_scope") == "해외" and dest_text:
+        if "," not in dest_text:
+            dest_text = f"{dest_text}, city"
+    
     dest_geo = geocode_place(dest_text) if dest_text else None
     start_geo = geocode_place(start_text) if start_text else None
 
@@ -1366,6 +1390,9 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
 
     allowed_types = set(st.session_state.poi_types or [])
     pois_filtered = [p for p in pois_all if (p.get("type") in allowed_types)] if allowed_types else pois_all
+    # 필터로 전부 날아가면 전체 POI 사용
+    if not pois_filtered:
+        pois_filtered = pois_all
 
     exclude_names = set(st.session_state.poi_user_exclude or set())
     styles = payload.get("travel_style", [])
@@ -1793,5 +1820,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
