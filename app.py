@@ -1323,6 +1323,9 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
     dest_text = (payload.get("destination_text") or "").strip()
     start_text = (payload.get("start_city") or "").strip()
 
+    dest_geo = geocode_place(dest_text) if dest_text else None
+    start_geo = geocode_place(start_text) if start_text else None
+
     if dest_geo:
         display = (dest_geo.get("display_name") or "").lower()
         if any(k in display for k in ["canada", "united states", "japan", "australia"]):
@@ -1790,3 +1793,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
