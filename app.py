@@ -958,20 +958,20 @@ def estimate_route_time_minutes(
     stay_min = 0  # ✅ 추가: 모든 경로에서 stay_min이 정의되도록 기본값 세팅
     
     if not points or len(points) == 1:
-    stay_min = 60 * len(points)  # POI 체류시간
-    total_min = 0               # 이동시간 없음
-    total_km = 0.0
+        stay_min = 60 * len(points)  # POI 체류시간
+        total_min = 0               # 이동시간 없음
+        total_km = 0.0
 
-    return {
-        "mode": mode,
-        "total_minutes": total_min,
-        "total_km": total_km,
-        "stay_minutes": stay_min,
-        "day_total_minutes": stay_min,
-        "overload": stay_min > 480,
-        "legs": [],
-        "note": "POI가 0~1개라 이동시간 없이 체류시간만 계산했어요.",
-    }
+        return {
+            "mode": mode,
+            "total_minutes": total_min,
+            "total_km": total_km,
+            "stay_minutes": stay_min,
+            "day_total_minutes": stay_min,
+            "overload": stay_min > 480,
+            "legs": [],
+            "note": "POI가 0~1개라 이동시간 없이 체류시간만 계산했어요.",
+        }
 
 
         return {
@@ -2495,6 +2495,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
