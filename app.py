@@ -1996,7 +1996,7 @@ def page3():
     st.markdown("</div>", unsafe_allow_html=True)
 
     tab_plan, tab_move, tab_poi, tab_hotel, tab_budget, tab_check, tab_export = st.tabs(
-        ["🧾 플랜", "⏱️ 이동시간", "🗺️ 지도+POI", "💸 예산", "✅ 체크리스트", "📤 내보내기"]
+        ["🧾 플랜", "⏱️ 이동시간", "🗺️ 지도+POI", "🏨 숙소", "💸 예산", "✅ 체크리스트", "📤 내보내기"]
     )
 
     with tab_plan:
@@ -2313,6 +2313,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
