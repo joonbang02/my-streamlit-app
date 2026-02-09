@@ -2,19 +2,34 @@ import os
 import math
 import time
 import json
+import logging
 from datetime import datetime, date, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, List, Tuple, Callable, Set
 
 import requests
 import streamlit as st
 import pydeck as pdk
 
+# =========================
+# Logging
+# =========================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger("travel-maker")
+
+# =========================
+# External APIs
+# =========================
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.nchc.org.tw/api/interpreter",
 ]
 
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 try:
     from openai import OpenAI
@@ -30,7 +45,9 @@ except Exception:
     rl_canvas = None
     mm = None
 
-
+# =========================
+# UI Theme
+# =========================
 APP_NAME = "Travel-Maker"
 
 BEIGE_BG = "#F6F0E6"
@@ -135,43 +152,72 @@ CSS = f"""
 </style>
 """
 
-
+# =========================
+# Session State (structured)
+# =========================
 def init_state():
     if "step" not in st.session_state:
         st.session_state.step = 1
 
-    defaults = {
-        "travel_month": "상관없음",
-        "party_type": "친구",
-        "party_count": 2,
-        "destination_scope": "국내",
-        "destination_text": "",
-        "duration": "3일",
-        "travel_style": ["힐링"],
-        "budget": 1000000,
-        "start_date": date.today(),
-        "start_city": "서울",
-        "openai_api_key": "",
-        "travel_mode_sidebar": "자유여행",
-        "move_mode": "자동",
-        "include_return_to_center": True,
-        "show_map": True,
-        "show_budget": True,
-        "show_checklist": True,
-        "enable_edit": True,
-        "poi_radius_km": 8,
-        "poi_limit": 50,
-        "poi_types": ["관광", "맛집", "카페", "자연", "문화"],
-        "last_payload_sig": None,
-        "last_bundle": None,
-        "itinerary_edits": {},
-        "poi_user_exclude": set(),
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    if "app" not in st.session_state:
+        st.session_state.app = {
+            "input": {
+                "travel_month": "상관없음",
+                "party_type": "친구",
+                "party_count": 2,
+                "destination_scope": "국내",
+                "destination_text": "",
+                "duration": "3일",
+                "travel_style": ["힐링"],
+                "budget": 1000000,
+                "start_date": date.today(),
+                "start_city": "서울",
+                "travel_mode": "자유여행",
+            },
+            "ui": {
+                "openai_api_key": "",
+                "move_mode": "자동",
+                "include_return_to_center": True,
+                "show_map": True,
+                "show_budget": True,
+                "show_checklist": True,
+                "enable_edit": True,
+                "poi_radius_km": 8,
+                "poi_limit": 50,
+                "poi_types": ["관광", "맛집", "카페", "자연", "문화"],
+                "debug_panel": False,
+            },
+            "cache": {
+                "last_payload_sig": None,
+                "last_bundle": None,
+            },
+            "runtime": {
+                "itinerary_edits": {},
+                "poi_user_exclude_ids": set(),  # ✅ now exclude by osm_id
+            },
+        }
 
 
+def sget(path: str, default=None):
+    cur = st.session_state.app
+    for k in path.split("."):
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def sset(path: str, value):
+    cur = st.session_state.app
+    keys = path.split(".")
+    for k in keys[:-1]:
+        cur = cur.setdefault(k, {})
+    cur[keys[-1]] = value
+
+
+# =========================
+# Helpers
+# =========================
 def month_hint(month: str) -> str:
     if month == "상관없음":
         return "월이 프리면, 날씨는 그때그때 ‘유연한 인간’ 모드로 대응 ㄱㄱ"
@@ -188,29 +234,6 @@ def month_hint(month: str) -> str:
     if m in [9, 10, 11]:
         return "가을은 진짜 반칙. 걷기/야외 코스 뽕 뽑기 좋은 시즌"
     return "날씨 힌트 로딩 실패… (하지만 우린 계획왕/퀸)"
-
-
-@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
-def geocode_place(query: str) -> Optional[Dict[str, Any]]:
-    if not query or not query.strip():
-        return None
-    url = "https://nominatim.openstreetmap.org/search"
-    params = {"q": query, "format": "json", "limit": 1}
-    headers = {"User-Agent": f"{APP_NAME}/1.0 (streamlit)"}
-    try:
-        time.sleep(0.15)
-        r = requests.get(url, params=params, headers=headers, timeout=12)
-        r.raise_for_status()
-        data = r.json()
-        if not data:
-            return None
-        return {
-            "lat": float(data[0]["lat"]),
-            "lon": float(data[0]["lon"]),
-            "display_name": data[0].get("display_name", query),
-        }
-    except Exception:
-        return None
 
 
 def haversine_km(lat1, lon1, lat2, lon2) -> float:
@@ -234,11 +257,108 @@ def classify_distance(km: Optional[float]) -> str:
     return "장거리(시차/체력/동선까지 전략 필요)"
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
+# =========================
+# Robust HTTP wrapper
+# =========================
+class ApiError(Exception):
+    pass
+
+
+def _request_json(
+    method: str,
+    url: str,
+    *,
+    params: Optional[dict] = None,
+    data: Optional[bytes] = None,
+    headers: Optional[dict] = None,
+    timeout: int = 12,
+    retries: int = 2,
+    backoff: float = 0.5,
+    name: str = "API",
+) -> Any:
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            r = requests.request(method, url, params=params, data=data, headers=headers, timeout=timeout)
+            # overpass can 429/504; treat as retryable
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise requests.HTTPError(f"{name} retryable status={r.status_code}", response=r)
+            r.raise_for_status()
+            return r.json()
+        except (requests.Timeout, requests.ConnectionError) as e:
+            last_exc = e
+            logger.warning("%s timeout/conn error (attempt %s/%s): %s", name, attempt + 1, retries + 1, e)
+        except requests.HTTPError as e:
+            last_exc = e
+            code = getattr(e.response, "status_code", None)
+            logger.warning("%s http error (attempt %s/%s): %s", name, attempt + 1, retries + 1, code)
+        except Exception as e:
+            last_exc = e
+            logger.exception("%s unknown error: %s", name, e)
+
+        if attempt < retries:
+            time.sleep(backoff * (2**attempt))
+
+    raise ApiError(f"{name} 호출 실패: {last_exc}")
+
+
+# =========================
+# Geocoding (Nominatim) - improved selection
+# =========================
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24 * 7)  # ✅ 7 days
+def geocode_place(query: str) -> Optional[Dict[str, Any]]:
+    if not query or not query.strip():
+        return None
+
+    headers = {"User-Agent": f"{APP_NAME}/1.0 (streamlit)"}
+    params = {
+        "q": query,
+        "format": "json",
+        "limit": 3,  # ✅ get a few candidates
+        "addressdetails": 1,
+    }
+
+    try:
+        time.sleep(0.15)  # ✅ be nice to nominatim
+        data = _request_json("GET", NOMINATIM_URL, params=params, headers=headers, timeout=12, retries=1, name="Nominatim")
+        if not data:
+            return None
+
+        # Prefer city/town, then administrative, then best importance
+        def score(item: dict) -> float:
+            t = item.get("type") or ""
+            cls = item.get("class") or ""
+            imp = float(item.get("importance") or 0.0)
+            s = imp
+            if t in ("city", "town"):
+                s += 2.0
+            if cls == "place":
+                s += 0.4
+            if t in ("administrative",):
+                s += 0.6
+            # Penalize country-level matches a bit
+            if t == "country" or cls == "boundary":
+                s -= 1.2
+            return s
+
+        best = sorted(data, key=score, reverse=True)[0]
+        return {
+            "lat": float(best["lat"]),
+            "lon": float(best["lon"]),
+            "display_name": best.get("display_name", query),
+            "raw": {"type": best.get("type"), "class": best.get("class"), "importance": best.get("importance")},
+        }
+    except Exception:
+        return None
+
+
+# =========================
+# Weather (Open-Meteo)
+# =========================
+@st.cache_data(show_spinner=False, ttl=60 * 60)  # ✅ 1 hour
 def fetch_open_meteo_forecast(lat: float, lon: float, days: int) -> Optional[Dict[str, Any]]:
     try:
         n = max(1, min(days, 16))
-        url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": lat,
             "longitude": lon,
@@ -246,9 +366,8 @@ def fetch_open_meteo_forecast(lat: float, lon: float, days: int) -> Optional[Dic
             "timezone": "auto",
             "forecast_days": n,
         }
-        r = requests.get(url, params=params, timeout=12)
-        r.raise_for_status()
-        d = r.json().get("daily", {})
+        j = _request_json("GET", OPEN_METEO_URL, params=params, timeout=12, retries=1, name="Open-Meteo(Forecast)")
+        d = (j or {}).get("daily", {}) or {}
         times = d.get("time", [])
         tmax = d.get("temperature_2m_max", [])
         tmin = d.get("temperature_2m_min", [])
@@ -263,10 +382,9 @@ def fetch_open_meteo_forecast(lat: float, lon: float, days: int) -> Optional[Dic
         return None
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 60)
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 6)  # ✅ 6 hours
 def fetch_open_meteo_recent_snapshot(lat: float, lon: float) -> Optional[Dict[str, Any]]:
     try:
-        url = "https://api.open-meteo.com/v1/forecast"
         params = {
             "latitude": lat,
             "longitude": lon,
@@ -274,9 +392,8 @@ def fetch_open_meteo_recent_snapshot(lat: float, lon: float) -> Optional[Dict[st
             "timezone": "auto",
             "forecast_days": 7,
         }
-        r = requests.get(url, params=params, timeout=12)
-        r.raise_for_status()
-        d = r.json().get("daily", {})
+        j = _request_json("GET", OPEN_METEO_URL, params=params, timeout=12, retries=1, name="Open-Meteo(Snapshot)")
+        d = (j or {}).get("daily", {}) or {}
         tmax = d.get("temperature_2m_max", [])
         tmin = d.get("temperature_2m_min", [])
         prcp = d.get("precipitation_sum", [])
@@ -291,6 +408,9 @@ def fetch_open_meteo_recent_snapshot(lat: float, lon: float) -> Optional[Dict[st
         return None
 
 
+# =========================
+# Overpass POI
+# =========================
 def _radius_to_bbox(lat: float, lon: float, radius_km: float) -> Tuple[float, float, float, float]:
     lat_deg = radius_km / 110.574
     lon_deg = radius_km / (111.320 * math.cos(math.radians(lat)) + 1e-9)
@@ -298,6 +418,7 @@ def _radius_to_bbox(lat: float, lon: float, radius_km: float) -> Tuple[float, fl
 
 
 def _overpass_query_bbox(south, west, north, east) -> str:
+    # (keep it simple: nodes only; stable & fast)
     return f"""
     [out:json][timeout:25];
     (
@@ -337,17 +458,50 @@ def _poi_type(tags: Dict[str, Any]) -> str:
     return "관광"
 
 
-@st.cache_data(show_spinner=False, ttl=60 * 30)
+def _poi_quality_score(tags: Dict[str, Any]) -> float:
+    """
+    ✅ Simple “quality” heuristics:
+    - wikidata/wikipedia/image present => likely notable POI
+    - name:en not required, but can help
+    - avoid placeholders / generic
+    """
+    s = 0.0
+    if tags.get("wikidata"):
+        s += 0.35
+    if tags.get("wikipedia"):
+        s += 0.35
+    if tags.get("image"):
+        s += 0.2
+    if tags.get("website"):
+        s += 0.08
+    if tags.get("opening_hours"):
+        s += 0.05
+    if tags.get("tourism") == "museum":
+        s += 0.12
+    # soft penalty for overly generic names
+    nm = (tags.get("name") or "").strip().lower()
+    if nm in ("park", "cafe", "restaurant") or len(nm) <= 2:
+        s -= 0.15
+    return s
+
+
+@st.cache_data(show_spinner=False, ttl=60 * 60 * 24)  # ✅ 1 day
 def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int):
     south, west, north, east = _radius_to_bbox(lat, lon, radius_km)
     query = _overpass_query_bbox(south, west, north, east)
 
     for url in OVERPASS_URLS:
         try:
-            r = requests.post(url, data=query.encode("utf-8"), timeout=35)
-            r.raise_for_status()
-            data = r.json()
-            elements = data.get("elements", []) or []
+            j = _request_json(
+                "POST",
+                url,
+                data=query.encode("utf-8"),
+                timeout=35,
+                retries=1,
+                backoff=0.8,
+                name=f"Overpass({url})",
+            )
+            elements = (j or {}).get("elements", []) or []
 
             pois = []
             for el in elements:
@@ -361,16 +515,23 @@ def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int):
                 if plat is None or plon is None:
                     continue
 
-                pois.append({
-                    "name": name,
-                    "lat": float(plat),
-                    "lon": float(plon),
-                    "type": _poi_type(tags),
-                    "tags": tags,
-                    "osm_id": el.get("id"),
-                })
+                pid = el.get("id")
+                if pid is None:
+                    continue
 
-            # ✅ 중복 제거는 try 블록 안
+                pois.append(
+                    {
+                        "name": name,
+                        "lat": float(plat),
+                        "lon": float(plon),
+                        "type": _poi_type(tags),
+                        "tags": tags,
+                        "osm_id": int(pid),
+                        "quality": round(_poi_quality_score(tags), 3),
+                    }
+                )
+
+            # ✅ dedupe by (name, lat, lon)
             seen = set()
             deduped = []
             for p in pois:
@@ -380,13 +541,27 @@ def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int):
                 seen.add(key)
                 deduped.append(p)
 
-            return deduped[: max(0, int(limit))]
+            # ✅ Rank: type bias + quality + closeness to center
+            def rank(p):
+                type_boost = {"관광": 0.15, "문화": 0.15, "자연": 0.12, "맛집": 0.08, "카페": 0.05, "유흥": 0.03}.get(
+                    p["type"], 0.0
+                )
+                dist = haversine_km(lat, lon, p["lat"], p["lon"])
+                # closeness bonus (<= radius)
+                closeness = max(0.0, 1.0 - dist / max(0.8, radius_km))
+                return type_boost + p["quality"] + 0.25 * closeness
 
+            deduped.sort(key=rank, reverse=True)
+            return deduped[: max(0, int(limit))]
         except Exception:
             continue
 
     return []
 
+
+# =========================
+# Itinerary engine
+# =========================
 def duration_to_days(duration: str) -> int:
     return {"당일치기": 1, "3일": 3, "5일": 5, "10일 이상": 10}.get(duration, 3)
 
@@ -402,7 +577,10 @@ def poi_score(poi: Dict[str, Any], styles: List[str]) -> float:
         "편의": 0.3,
     }.get(poi.get("type", "관광"), 0.8)
 
-    s = base
+    # ✅ incorporate “quality” (notability hints)
+    quality = float(poi.get("quality") or 0.0)
+    s = base + 0.45 * quality
+
     if "힐링" in styles and poi["type"] in ["자연", "카페"]:
         s += 0.35
     if "식도락" in styles and poi["type"] in ["맛집", "카페"]:
@@ -485,13 +663,13 @@ def build_itinerary_from_pois(
     pois: List[Dict[str, Any]],
     styles: List[str],
     days: int,
-    exclude_names: Optional[set] = None,
+    exclude_ids: Optional[Set[int]] = None,
 ) -> Dict[int, List[Dict[str, Any]]]:
-    exclude_names = exclude_names or set()
+    exclude_ids = exclude_ids or set()
     if not pois:
         return {d: [] for d in range(1, days + 1)}
 
-    filtered = [p for p in pois if p["name"] not in exclude_names]
+    filtered = [p for p in pois if int(p.get("osm_id") or -1) not in exclude_ids]
     scored = [(poi_score(p, styles), p) for p in filtered]
     scored.sort(key=lambda x: x[0], reverse=True)
 
@@ -535,7 +713,13 @@ def estimate_route_time_minutes(
     points: List[Tuple[float, float]],
     mode: str,
     return_to_center: bool = True,
+    radius_km: float = 8.0,
 ) -> Dict[str, Any]:
+    """
+    ✅ Improved realism:
+    - Short leg => less overhead
+    - Dense area => slightly slower effective speed
+    """
     if not points or len(points) == 1:
         return {
             "mode": mode,
@@ -548,6 +732,10 @@ def estimate_route_time_minutes(
     speed = move_speed_kmh(mode)
     overhead = leg_overhead_min(mode)
 
+    # Density adjustment (more points in smaller radius => slower)
+    density = len(points) / max(1.0, radius_km)
+    speed *= max(0.72, 1.15 - 0.06 * density)
+
     lats = [p[0] for p in points]
     lons = [p[1] for p in points]
     center = (sum(lats) / len(lats), sum(lons) / len(lons))
@@ -556,11 +744,19 @@ def estimate_route_time_minutes(
     total_km = 0.0
     total_min = 0.0
 
+    def leg_minutes(km: float) -> float:
+        local_overhead = overhead
+        if km < 0.8:
+            local_overhead *= 0.6
+        elif km > 8 and mode == "대중교통":
+            local_overhead += 5
+        return (km / max(3.0, speed)) * 60.0 + local_overhead
+
     for i in range(len(points) - 1):
         a = points[i]
         b = points[i + 1]
         km = haversine_km(a[0], a[1], b[0], b[1])
-        minutes = (km / speed) * 60.0 + overhead
+        minutes = leg_minutes(km)
         legs.append({"from": i, "to": i + 1, "km": round(km, 2), "minutes": int(round(minutes))})
         total_km += km
         total_min += minutes
@@ -568,7 +764,7 @@ def estimate_route_time_minutes(
     if return_to_center:
         last = points[-1]
         km = haversine_km(last[0], last[1], center[0], center[1])
-        minutes = (km / speed) * 60.0 + overhead
+        minutes = leg_minutes(km)
         legs.append({"from": len(points) - 1, "to": "center", "km": round(km, 2), "minutes": int(round(minutes))})
         total_km += km
         total_min += minutes
@@ -578,7 +774,7 @@ def estimate_route_time_minutes(
         "total_minutes": int(round(total_min)),
         "total_km": round(total_km, 2),
         "legs": legs,
-        "note": "추정치(직선거리+오버헤드)라 실제 교통/경로에 따라 달라질 수 있어요.",
+        "note": "추정치(직선거리 기반 보정)라 실제 교통/경로에 따라 달라질 수 있어요.",
     }
 
 
@@ -597,11 +793,14 @@ def build_day_travel_times(
         mode = move_mode_setting
         if mode == "자동":
             mode = inferred
-        day_times[d] = estimate_route_time_minutes(pts, mode=mode, return_to_center=return_to_center)
+        day_times[d] = estimate_route_time_minutes(pts, mode=mode, return_to_center=return_to_center, radius_km=radius_km)
 
     return day_times
 
 
+# =========================
+# Budget
+# =========================
 def budget_tier(budget: int) -> str:
     if budget <= 0:
         return "미정(=무한 가능성…이 아니라 입력 부탁 🥲)"
@@ -659,6 +858,9 @@ def allocate_budget(total: int, mode: str, style: List[str]) -> Dict[str, int]:
     return alloc
 
 
+# =========================
+# Checklist
+# =========================
 def build_checklist(destination_scope: str, month: str, style: List[str], party_type: str) -> Dict[str, List[str]]:
     packing = [
         "보조배터리(진짜 생존템)",
@@ -716,6 +918,9 @@ def build_checklist(destination_scope: str, month: str, style: List[str], party_
     }
 
 
+# =========================
+# Plan builders
+# =========================
 def plan_from_poi_daymap(dest: str, days: int, day_map: Dict[int, List[Dict[str, Any]]], styles: List[str], party: str) -> Dict[str, Any]:
     day_blocks = []
     for d in range(1, days + 1):
@@ -809,6 +1014,34 @@ def build_rule_based_plan(
     return plan
 
 
+# =========================
+# OpenAI (schema validation added)
+# =========================
+def _validate_plan_schema(plan: Dict[str, Any]) -> Tuple[bool, str]:
+    if not isinstance(plan, dict):
+        return False, "plan is not dict"
+    for k in ("headline", "summary", "day_blocks"):
+        if k not in plan:
+            return False, f"missing key: {k}"
+    if not isinstance(plan.get("day_blocks"), list):
+        return False, "day_blocks is not list"
+    for b in plan["day_blocks"][:20]:
+        if not isinstance(b, dict):
+            return False, "day_blocks item not dict"
+        if "day" not in b or "plan" not in b:
+            return False, "day_blocks item missing fields"
+        if not isinstance(b.get("plan"), list):
+            return False, "plan field not list"
+    # normalize sources
+    if "sources" in plan and not isinstance(plan["sources"], list):
+        plan["sources"] = []
+    if "tips" in plan and not isinstance(plan["tips"], list):
+        plan["tips"] = []
+    plan.setdefault("tips", [])
+    plan.setdefault("sources", [])
+    return True, ""
+
+
 def call_openai_plan(openai_api_key: str, payload: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     if OpenAI is None:
         return None, "openai 패키지가 없어요. `pip install openai` 해주세요."
@@ -875,9 +1108,11 @@ def call_openai_plan(openai_api_key: str, payload: Dict[str, Any]) -> Tuple[Opti
     if plan is None or not isinstance(plan, dict):
         return None, "계획 JSON 파싱 실패(모델 출력 형식 흔들림)"
 
+    # merge sources from web_search_call if possible
     sources = plan.get("sources", [])
     if not isinstance(sources, list):
         sources = []
+
     try:
         dumped = resp.model_dump() if hasattr(resp, "model_dump") else None
         if dumped and "output" in dumped:
@@ -894,11 +1129,18 @@ def call_openai_plan(openai_api_key: str, payload: Dict[str, Any]) -> Tuple[Opti
     except Exception:
         pass
 
+    ok, msg = _validate_plan_schema(plan)
+    if not ok:
+        return None, f"OpenAI 플랜 스키마 검증 실패: {msg}"
+
     return plan, None
 
 
+# =========================
+# Itinerary edits
+# =========================
 def ensure_itinerary_edits(days: int, plan: Dict[str, Any]):
-    edits = st.session_state.itinerary_edits or {}
+    edits = sget("runtime.itinerary_edits", {}) or {}
     seed = {}
     for b in plan.get("day_blocks", []):
         try:
@@ -914,11 +1156,11 @@ def ensure_itinerary_edits(days: int, plan: Dict[str, Any]):
     for d in range(1, days + 1):
         if d not in edits:
             edits[d] = seed.get(d, {"am": "☀️ 오전: ", "pm": "🌤️ 오후: ", "night": "🌙 밤: "})
-    st.session_state.itinerary_edits = edits
+    sset("runtime.itinerary_edits", edits)
 
 
 def apply_itinerary_edits(plan: Dict[str, Any]) -> Dict[str, Any]:
-    edits = st.session_state.itinerary_edits or {}
+    edits = sget("runtime.itinerary_edits", {}) or {}
     new_plan = json.loads(json.dumps(plan))
     for b in new_plan.get("day_blocks", []):
         try:
@@ -930,6 +1172,9 @@ def apply_itinerary_edits(plan: Dict[str, Any]) -> Dict[str, Any]:
     return new_plan
 
 
+# =========================
+# Export: ICS / PDF
+# =========================
 def make_ics(bundle: Dict[str, Any]) -> str:
     payload = bundle.get("payload", {})
     plan = bundle.get("plan", {})
@@ -1097,6 +1342,9 @@ def make_pdf_bytes(bundle: Dict[str, Any]) -> Optional[bytes]:
     return buf.getvalue()
 
 
+# =========================
+# Map
+# =========================
 def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
     if not dest_geo:
         st.info("지도는 목적지 좌표를 못 찾으면 표시가 어려워요. (도시/나라를 더 정확히 써줘봐!)")
@@ -1131,6 +1379,9 @@ def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
     st.pydeck_chart(deck, use_container_width=True)
 
 
+# =========================
+# UI
+# =========================
 def render_header():
     st.markdown(CSS, unsafe_allow_html=True)
     st.markdown(
@@ -1145,57 +1396,70 @@ def render_header():
 def render_sidebar():
     st.sidebar.markdown("### 🔑 OpenAI API Key")
     st.sidebar.caption("키는 세션에만 저장(서버 저장 X). 없으면 POI 최적화 룰베이스로 갑니다.")
-    st.session_state.openai_api_key = st.sidebar.text_input(
-        "OPENAI_API_KEY",
-        type="password",
-        placeholder="sk-... (optional)",
-        value=st.session_state.get("openai_api_key", ""),
+    sset(
+        "ui.openai_api_key",
+        st.sidebar.text_input(
+            "OPENAI_API_KEY",
+            type="password",
+            placeholder="sk-... (optional)",
+            value=sget("ui.openai_api_key", ""),
+        ),
     )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🧳 출발지(거리 계산용)")
-    st.session_state.start_city = st.sidebar.text_input("출발 도시", value=st.session_state.get("start_city", "서울"))
+    sset("input.start_city", st.sidebar.text_input("출발 도시", value=sget("input.start_city", "서울")))
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🗓️ 시작 날짜(예보/ICS용)")
-    st.session_state.start_date = st.sidebar.date_input("여행 시작일", value=st.session_state.get("start_date", date.today()))
+    sset("input.start_date", st.sidebar.date_input("여행 시작일", value=sget("input.start_date", date.today())))
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🧭 POI 자동 수집 옵션")
-    st.session_state.poi_radius_km = st.sidebar.slider("반경(km)", min_value=1, max_value=20, value=int(st.session_state.get("poi_radius_km", 5)))
-    st.session_state.poi_limit = st.sidebar.slider("POI 최대 개수", min_value=10, max_value=120, value=int(st.session_state.get("poi_limit", 50)), step=10)
-    st.session_state.poi_types = st.sidebar.multiselect(
-        "POI 타입 필터(표시/계획에 반영)",
-        ["관광", "문화", "자연", "맛집", "카페", "유흥"],
-        default=st.session_state.get("poi_types", ["관광", "맛집", "카페", "자연", "문화"]),
+    sset("ui.poi_radius_km", st.sidebar.slider("반경(km)", 1, 20, int(sget("ui.poi_radius_km", 5))))
+    sset("ui.poi_limit", st.sidebar.slider("POI 최대 개수", 10, 120, int(sget("ui.poi_limit", 50)), step=10))
+    sset(
+        "ui.poi_types",
+        st.sidebar.multiselect(
+            "POI 타입 필터(표시/계획에 반영)",
+            ["관광", "문화", "자연", "맛집", "카페", "유흥"],
+            default=sget("ui.poi_types", ["관광", "맛집", "카페", "자연", "문화"]),
+        ),
     )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🚶 Day 이동시간 추정 설정")
-    st.session_state.move_mode = st.sidebar.selectbox(
-        "이동수단",
-        ["자동", "도보", "대중교통", "차량"],
-        index=["자동", "도보", "대중교통", "차량"].index(st.session_state.get("move_mode", "자동")),
+    sset(
+        "ui.move_mode",
+        st.sidebar.selectbox(
+            "이동수단",
+            ["자동", "도보", "대중교통", "차량"],
+            index=["자동", "도보", "대중교통", "차량"].index(sget("ui.move_mode", "자동")),
+        ),
     )
-    st.session_state.include_return_to_center = st.sidebar.toggle(
-        "하루 마지막에 중심(대략 숙소) 복귀 포함",
-        value=st.session_state.get("include_return_to_center", True),
+    sset(
+        "ui.include_return_to_center",
+        st.sidebar.toggle("하루 마지막에 중심(대략 숙소) 복귀 포함", value=bool(sget("ui.include_return_to_center", True))),
     )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🧳 (선택) 여행 형태(예산 분배용)")
-    st.session_state.travel_mode_sidebar = st.sidebar.selectbox(
-        "여행 형태",
-        ["자유여행", "패키지여행"],
-        index=["자유여행", "패키지여행"].index(st.session_state.get("travel_mode_sidebar", "자유여행")),
+    sset(
+        "input.travel_mode",
+        st.sidebar.selectbox(
+            "여행 형태",
+            ["자유여행", "패키지여행"],
+            index=["자유여행", "패키지여행"].index(sget("input.travel_mode", "자유여행")),
+        ),
     )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ⚙️ 확장 UI 토글")
-    st.session_state.show_map = st.sidebar.toggle("지도 표시", value=st.session_state.get("show_map", True))
-    st.session_state.enable_edit = st.sidebar.toggle("일정 편집 모드", value=st.session_state.get("enable_edit", True))
-    st.session_state.show_budget = st.sidebar.toggle("예산 분배 표시", value=st.session_state.get("show_budget", True))
-    st.session_state.show_checklist = st.sidebar.toggle("체크리스트 표시", value=st.session_state.get("show_checklist", True))
+    sset("ui.show_map", st.sidebar.toggle("지도 표시", value=bool(sget("ui.show_map", True))))
+    sset("ui.enable_edit", st.sidebar.toggle("일정 편집 모드", value=bool(sget("ui.enable_edit", True))))
+    sset("ui.show_budget", st.sidebar.toggle("예산 분배 표시", value=bool(sget("ui.show_budget", True))))
+    sset("ui.show_checklist", st.sidebar.toggle("체크리스트 표시", value=bool(sget("ui.show_checklist", True))))
+    sset("ui.debug_panel", st.sidebar.toggle("디버그 패널", value=bool(sget("ui.debug_panel", False))))
 
 
 def page1():
@@ -1213,18 +1477,20 @@ def page1():
     c1, c2 = st.columns(2)
 
     with c1:
-        st.session_state.travel_month = st.selectbox(
-            "여행 시기(월 단위)",
-            months,
-            index=months.index(st.session_state.travel_month),
+        sset(
+            "input.travel_month",
+            st.selectbox("여행 시기(월 단위)", months, index=months.index(sget("input.travel_month", "상관없음"))),
         )
-        st.session_state.party_count = st.number_input("여행 인원", min_value=1, max_value=30, value=int(st.session_state.party_count), step=1)
+        sset("input.party_count", st.number_input("여행 인원", 1, 30, int(sget("input.party_count", 2)), 1))
 
     with c2:
-        st.session_state.party_type = st.selectbox(
-            "관계",
-            ["친구", "연인", "부모님", "가족", "혼자", "직장동료", "기타"],
-            index=["친구", "연인", "부모님", "가족", "혼자", "직장동료", "기타"].index(st.session_state.party_type),
+        sset(
+            "input.party_type",
+            st.selectbox(
+                "관계",
+                ["친구", "연인", "부모님", "가족", "혼자", "직장동료", "기타"],
+                index=["친구", "연인", "부모님", "가족", "혼자", "직장동료", "기타"].index(sget("input.party_type", "친구")),
+            ),
         )
 
     st.markdown(
@@ -1241,17 +1507,20 @@ def page1():
 
     c3, c4 = st.columns([1, 2])
     with c3:
-        st.session_state.destination_scope = st.selectbox(
-            "국내/해외",
-            ["국내", "해외"],
-            index=["국내", "해외"].index(st.session_state.destination_scope),
+        sset(
+            "input.destination_scope",
+            st.selectbox("국내/해외", ["국내", "해외"], index=["국내", "해외"].index(sget("input.destination_scope", "국내"))),
         )
     with c4:
-        st.session_state.destination_text = st.text_input(
-            "여행 도시 입력 (국가명 ❌ / 도시명 ⭕)",
-            value=st.session_state.destination_text,
-            placeholder="예: 밴쿠버 / 토론토 / 도쿄 / 파리",
-        )        
+        sset(
+            "input.destination_text",
+            st.text_input(
+                "여행 도시 입력 (국가명 ❌ / 도시명 ⭕)",
+                value=sget("input.destination_text", ""),
+                placeholder="예: 밴쿠버 / 토론토 / 도쿄 / 파리",
+            ),
+        )
+
     nav = st.columns([1, 1, 2])
     with nav[2]:
         if st.button("다음 👉 (추가 정보로)", use_container_width=True):
@@ -1271,24 +1540,23 @@ def page2():
 
     c1, c2 = st.columns(2)
     with c1:
-        st.session_state.duration = st.selectbox(
-            "여행 일정",
-            ["당일치기", "3일", "5일", "10일 이상"],
-            index=["당일치기", "3일", "5일", "10일 이상"].index(st.session_state.duration),
+        sset(
+            "input.duration",
+            st.selectbox("여행 일정", ["당일치기", "3일", "5일", "10일 이상"], index=["당일치기", "3일", "5일", "10일 이상"].index(sget("input.duration", "3일"))),
         )
-        st.session_state.budget = st.number_input(
-            "예상 예산(원)",
-            min_value=0,
-            max_value=20000000,
-            value=int(st.session_state.budget),
-            step=50000,
+        sset(
+            "input.budget",
+            st.number_input("예상 예산(원)", 0, 20000000, int(sget("input.budget", 1000000)), step=50000),
         )
 
     with c2:
-        st.session_state.travel_style = st.multiselect(
-            "여행 스타일(복수 선택 가능)",
-            ["힐링", "식도락", "유흥", "로드트립", "액티비티", "쇼핑", "문화/예술", "자연", "테마파크"],
-            default=st.session_state.travel_style,
+        sset(
+            "input.travel_style",
+            st.multiselect(
+                "여행 스타일(복수 선택 가능)",
+                ["힐링", "식도락", "유흥", "로드트립", "액티비티", "쇼핑", "문화/예술", "자연", "테마파크"],
+                default=sget("input.travel_style", ["힐링"]),
+            ),
         )
 
     nav = st.columns([1, 1, 2])
@@ -1302,19 +1570,19 @@ def page2():
 
 def build_payload() -> Dict[str, Any]:
     return {
-        "travel_month": st.session_state.travel_month,
-        "party_count": int(st.session_state.party_count),
-        "party_type": st.session_state.party_type,
-        "destination_scope": st.session_state.destination_scope,
-        "destination_text": st.session_state.destination_text,
-        "duration": st.session_state.duration,
-        "travel_style": st.session_state.travel_style,
-        "budget": int(st.session_state.budget),
-        "start_city": st.session_state.start_city,
-        "start_date": st.session_state.start_date.isoformat(),
+        "travel_month": sget("input.travel_month"),
+        "party_count": int(sget("input.party_count")),
+        "party_type": sget("input.party_type"),
+        "destination_scope": sget("input.destination_scope"),
+        "destination_text": sget("input.destination_text"),
+        "duration": sget("input.duration"),
+        "travel_style": sget("input.travel_style"),
+        "budget": int(sget("input.budget")),
+        "start_city": sget("input.start_city"),
+        "start_date": sget("input.start_date").isoformat(),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "start_date_obj": st.session_state.start_date,
-        "travel_mode": st.session_state.travel_mode_sidebar,
+        "start_date_obj": sget("input.start_date"),
+        "travel_mode": sget("input.travel_mode"),
     }
 
 
@@ -1328,17 +1596,17 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
     payload = build_payload()
     sig = payload_signature(payload)
 
-    if st.session_state.last_payload_sig == sig and st.session_state.last_bundle is not None:
-        return st.session_state.last_bundle, None
+    if sget("cache.last_payload_sig") == sig and sget("cache.last_bundle") is not None:
+        return sget("cache.last_bundle"), None
 
     dest_text = (payload.get("destination_text") or "").strip()
     start_text = (payload.get("start_city") or "").strip()
 
-    # 해외인데 도시 힌트가 없으면 강제로 city 힌트 추가 (국가 중심 방지)
+    # 해외인데 도시 힌트가 없으면 city 힌트 추가
     if payload.get("destination_scope") == "해외" and dest_text:
         if "," not in dest_text:
             dest_text = f"{dest_text}, city"
-    
+
     dest_geo = geocode_place(dest_text) if dest_text else None
     start_geo = geocode_place(start_text) if start_text else None
 
@@ -1346,7 +1614,7 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         display = (dest_geo.get("display_name") or "").lower()
         if any(k in display for k in ["canada", "united states", "japan", "australia"]):
             st.info(
-                "입력한 값이 ‘국가 단위’로 인식됐어요. "
+                "입력한 값이 ‘국가 단위’로 인식됐을 가능성이 있어요. "
                 "도시로 입력하면 POI·동선·이동시간 정확도가 훨씬 좋아져요! "
                 "예: 밴쿠버 / 토론토 / 도쿄"
             )
@@ -1372,38 +1640,42 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         forecast_note = "시작일이 예보 범위 밖이라 ‘최근 스냅샷 + 월 힌트’로 감 잡기 모드!"
 
     pois_all = []
+    overpass_err = None
     if dest_geo:
-        pois_all = fetch_pois_overpass(
-            dest_geo["lat"],
-            dest_geo["lon"],
-            radius_km=float(st.session_state.poi_radius_km),
-            limit=int(st.session_state.poi_limit),
-        )
+        try:
+            pois_all = fetch_pois_overpass(
+                dest_geo["lat"],
+                dest_geo["lon"],
+                radius_km=float(sget("ui.poi_radius_km")),
+                limit=int(sget("ui.poi_limit")),
+            )
+        except Exception as e:
+            overpass_err = str(e)
+            pois_all = []
 
-    allowed_types = set(st.session_state.poi_types or [])
+    allowed_types = set(sget("ui.poi_types") or [])
     pois_filtered = [p for p in pois_all if (p.get("type") in allowed_types)] if allowed_types else pois_all
-    # 필터로 전부 날아가면 전체 POI 사용
     if not pois_filtered:
         pois_filtered = pois_all
 
-    exclude_names = set(st.session_state.poi_user_exclude or set())
+    exclude_ids = set(sget("runtime.poi_user_exclude_ids") or set())
     styles = payload.get("travel_style", [])
-    poi_daymap = build_itinerary_from_pois(pois_filtered, styles, days=days, exclude_names=exclude_names)
+    poi_daymap = build_itinerary_from_pois(pois_filtered, styles, days=days, exclude_ids=exclude_ids)
 
-    move_mode_setting = st.session_state.move_mode
+    move_mode_setting = sget("ui.move_mode")
     day_travel_times = build_day_travel_times(
         poi_daymap,
         styles=styles,
-        radius_km=float(st.session_state.poi_radius_km),
+        radius_km=float(sget("ui.poi_radius_km")),
         move_mode_setting=move_mode_setting,
-        return_to_center=bool(st.session_state.include_return_to_center),
+        return_to_center=bool(sget("ui.include_return_to_center")),
     )
     mode_used = None
     if day_travel_times:
         mode_used = day_travel_times.get(1, {}).get("mode") or None
 
     err = None
-    openai_key = (st.session_state.get("openai_api_key") or "").strip()
+    openai_key = (sget("ui.openai_api_key") or "").strip()
     plan = None
 
     enriched_payload = dict(payload)
@@ -1412,12 +1684,12 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
     enriched_payload["distance_comment"] = distance_comment
     enriched_payload["weather_snapshot"] = snapshot
     enriched_payload["weather_forecast_daily"] = forecast.get("daily") if forecast else None
-    enriched_payload["poi_sample"] = [{"name": p["name"], "type": p["type"]} for p in pois_filtered[:25]]
+    enriched_payload["poi_sample"] = [{"name": p["name"], "type": p["type"], "quality": p.get("quality", 0)} for p in pois_filtered[:25]]
     enriched_payload["estimated_day_travel_times"] = {
         str(d): {"mode": info.get("mode"), "total_minutes": info.get("total_minutes"), "total_km": info.get("total_km")}
         for d, info in day_travel_times.items()
     }
-    enriched_payload["note"] = "이동시간은 직선거리+오버헤드 기반 추정치임(실제 경로/교통상황과 다를 수 있음)."
+    enriched_payload["note"] = "이동시간은 직선거리 기반 보정치임(실제 경로/교통상황과 다를 수 있음)."
 
     if openai_key:
         plan, err = call_openai_plan(openai_key, enriched_payload)
@@ -1444,8 +1716,9 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         "day_travel_times": day_travel_times,
         "move_mode_setting": move_mode_setting,
         "move_mode_used": mode_used
-        or (infer_move_mode(styles, float(st.session_state.poi_radius_km)) if move_mode_setting == "자동" else move_mode_setting),
+        or (infer_move_mode(styles, float(sget("ui.poi_radius_km"))) if move_mode_setting == "자동" else move_mode_setting),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "overpass_error": overpass_err,
     }
 
     bundle = {
@@ -1457,9 +1730,9 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         "exported_at": datetime.now().isoformat(timespec="seconds"),
     }
 
-    st.session_state.last_payload_sig = sig
-    st.session_state.last_bundle = bundle
-    st.session_state.itinerary_edits = {}
+    sset("cache.last_payload_sig", sig)
+    sset("cache.last_bundle", bundle)
+    sset("runtime.itinerary_edits", {})
 
     return bundle, err
 
@@ -1487,6 +1760,9 @@ def page3():
 
     if err:
         st.warning(f"OpenAI 쪽은 실패했지만, 플랜은 POI 최적화 룰베이스로 완주했어 🛟\n\n사유: {err}")
+
+    if meta.get("overpass_error"):
+        st.info(f"POI 수집이 불안정했을 수 있어요(Overpass). 필요하면 반경/개수를 줄이거나 다시 시도해줘.\n\n사유: {meta['overpass_error']}")
 
     dest_geo = meta.get("dest_geo")
     dest_name = dest_geo["display_name"] if dest_geo else (payload.get("destination_text") or "미입력(이러면 추천이 ‘감’이 됨)")
@@ -1545,15 +1821,17 @@ def page3():
 
         ensure_itinerary_edits(days, plan)
 
-        if st.session_state.get("enable_edit", True):
+        if sget("ui.enable_edit", True):
             st.caption("편집 모드 ON ✅ (오전/오후/밤을 바꿔서 ‘내 플랜’로 커스터마이징)")
             for d in range(1, days + 1):
                 with st.expander(f"Day {d} 편집하기", expanded=(d == 1)):
-                    ed = st.session_state.itinerary_edits.get(d, {"am": "", "pm": "", "night": ""})
+                    edits = sget("runtime.itinerary_edits", {})
+                    ed = edits.get(d, {"am": "", "pm": "", "night": ""})
                     ed["am"] = st.text_input(f"Day {d} - 오전", value=ed["am"], key=f"edit_am_{d}")
                     ed["pm"] = st.text_input(f"Day {d} - 오후", value=ed["pm"], key=f"edit_pm_{d}")
                     ed["night"] = st.text_input(f"Day {d} - 밤", value=ed["night"], key=f"edit_night_{d}")
-                    st.session_state.itinerary_edits[d] = ed
+                    edits[d] = ed
+                    sset("runtime.itinerary_edits", edits)
             final_plan = apply_itinerary_edits(plan)
         else:
             final_plan = plan
@@ -1606,7 +1884,7 @@ def page3():
             """
             <div class="tm-card">
               <div class="tm-section-title">⏱️ Day별 이동시간(추정치)</div>
-              <div class="tm-tip">직선거리(POI 간) + 구간별 오버헤드(대기/주차/신호)로 계산한 추정치야.</div>
+              <div class="tm-tip">직선거리 + (짧은 구간 오버헤드↓ / 혼잡 밀도 보정)으로 계산한 추정치야.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1648,7 +1926,7 @@ def page3():
             unsafe_allow_html=True,
         )
 
-        if st.session_state.get("show_map", True):
+        if sget("ui.show_map", True):
             st.markdown('<div class="tm-section-title">🗺️ 지도</div>', unsafe_allow_html=True)
             st.markdown('<div class="tm-card">', unsafe_allow_html=True)
             render_map(dest_geo, pois)
@@ -1660,32 +1938,36 @@ def page3():
         if not pois:
             st.info("POI를 못 가져왔어… (목적지 좌표/Overpass 상태 확인). 그래도 플랜은 계속 가능!")
         else:
-            cols = st.columns([3, 1, 1, 1])
+            cols = st.columns([3, 1, 1, 1, 1])
             cols[0].markdown("**이름**")
             cols[1].markdown("**타입**")
-            cols[2].markdown("**제외**")
-            cols[3].markdown("**대략거리(중심)**")
+            cols[2].markdown("**퀄리티**")
+            cols[3].markdown("**제외**")
+            cols[4].markdown("**대략거리(중심)**")
 
-            exclude_set = set(st.session_state.poi_user_exclude or set())
+            exclude_set = set(sget("runtime.poi_user_exclude_ids") or set())
             center_lat = dest_geo["lat"] if dest_geo else pois[0]["lat"]
             center_lon = dest_geo["lon"] if dest_geo else pois[0]["lon"]
 
             display_n = min(len(pois), 60)
             for i in range(display_n):
                 p = pois[i]
-                row = st.columns([3, 1, 1, 1])
+                pid = int(p["osm_id"])
+                row = st.columns([3, 1, 1, 1, 1])
                 row[0].write(p["name"])
                 row[1].write(p["type"])
-                checked = row[2].checkbox("", value=(p["name"] in exclude_set), key=f"exclude_{p['osm_id']}_{i}")
+                row[2].write(f"{float(p.get('quality') or 0):.2f}")
+
+                checked = row[3].checkbox("", value=(pid in exclude_set), key=f"exclude_{pid}_{i}")
                 if checked:
-                    exclude_set.add(p["name"])
+                    exclude_set.add(pid)
                 else:
-                    exclude_set.discard(p["name"])
+                    exclude_set.discard(pid)
 
                 dist = haversine_km(center_lat, center_lon, p["lat"], p["lon"])
-                row[3].write(f"{dist:.1f}km")
+                row[4].write(f"{dist:.1f}km")
 
-            st.session_state.poi_user_exclude = exclude_set
+            sset("runtime.poi_user_exclude_ids", exclude_set)
             st.caption("제외 변경 후 아래 ‘재최적화’ 버튼을 누르면 일정/이동시간이 새로 계산돼요.")
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1700,11 +1982,11 @@ def page3():
         st.markdown("</div>", unsafe_allow_html=True)
 
         if st.button("POI 제외 반영 + 일정/이동시간 재최적화 🔄", use_container_width=True):
-            st.session_state.last_payload_sig = None
+            sset("cache.last_payload_sig", None)
             st.rerun()
 
     with tab_budget:
-        if st.session_state.get("show_budget", True):
+        if sget("ui.show_budget", True):
             alloc = allocate_budget(int(payload["budget"]), payload.get("travel_mode", "자유여행"), styles)
             st.markdown('<div class="tm-card">', unsafe_allow_html=True)
             st.markdown('<div class="tm-section-title">💸 예산 분배(추천)</div>', unsafe_allow_html=True)
@@ -1717,7 +1999,7 @@ def page3():
             st.info("사이드바에서 ‘예산 분배 표시’를 켜면 나와요.")
 
     with tab_check:
-        if st.session_state.get("show_checklist", True):
+        if sget("ui.show_checklist", True):
             checklist = build_checklist(payload["destination_scope"], payload["travel_month"], styles, payload["party_type"])
             st.markdown('<div class="tm-card">', unsafe_allow_html=True)
             st.markdown('<div class="tm-section-title">✅ 체크리스트(준비물)</div>', unsafe_allow_html=True)
@@ -1782,6 +2064,14 @@ def page3():
                 use_container_width=True,
             )
 
+    # Debug Panel
+    if sget("ui.debug_panel", False):
+        with st.expander("🧪 디버그 패널", expanded=False):
+            st.write("meta:")
+            st.json(meta)
+            st.write("payload:")
+            st.json({k: v for k, v in payload.items() if k != "start_date_obj"})
+
     nav = st.columns([1, 1, 2])
     with nav[0]:
         if st.button("👈 입력 수정", use_container_width=True):
@@ -1791,11 +2081,14 @@ def page3():
             st.session_state.step = 2
     with nav[2]:
         if st.button("완전 새로 뽑기(캐시 초기화) 🔄", use_container_width=True):
-            st.session_state.last_payload_sig = None
-            st.session_state.last_bundle = None
+            sset("cache.last_payload_sig", None)
+            sset("cache.last_bundle", None)
             st.rerun()
 
 
+# =========================
+# App
+# =========================
 def main():
     st.set_page_config(page_title=APP_NAME, page_icon="🧳", layout="wide")
     init_state()
@@ -1812,7 +2105,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
