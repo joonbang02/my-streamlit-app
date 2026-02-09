@@ -1375,7 +1375,7 @@ def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
         )
 
     view = pdk.ViewState(latitude=dest_geo["lat"], longitude=dest_geo["lon"], zoom=11)
-    deck = pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{name} ({kind})"})
+    deck = pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{name} ({kind})"}, map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json", )
     st.pydeck_chart(deck, use_container_width=True)
 
 
@@ -2105,3 +2105,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
