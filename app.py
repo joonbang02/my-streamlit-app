@@ -1357,22 +1357,31 @@ def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
             "ScatterplotLayer",
             data=dest_data,
             get_position=["lon", "lat"],
-            get_radius=6000,
+
+            radius_units="meters",          # ✅ 추가
+            get_radius=350,                 # ✅ 수정
+            get_fill_color=[192, 122, 77, 220],  # ✅ 추가 (브랜드 색)
+
             pickable=True,
         )
     )
 
     if pois:
         poi_data = [{"lat": p["lat"], "lon": p["lon"], "name": p["name"], "kind": p["type"]} for p in pois]
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=poi_data,
-                get_position=["lon", "lat"],
-                get_radius=2500,
-                pickable=True,
-            )
+    layers.append(
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=poi_data,
+            get_position=["lon", "lat"],
+
+            radius_units="meters",          # ✅ 추가 (핵심)
+            get_radius=120,                 # ✅ 수정 (기존 2500 ❌)
+            get_fill_color=[80, 140, 200, 180],  # ✅ 추가 (파란색)
+
+            pickable=True,
         )
+    )
+
 
     view = pdk.ViewState(latitude=dest_geo["lat"], longitude=dest_geo["lon"], zoom=11)
     deck = pdk.Deck(layers=layers, initial_view_state=view, tooltip={"text": "{name} ({kind})"}, map_style="https://basemaps.cartocdn.com/gl/positron-gl-style/style.json", )
@@ -2105,4 +2114,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
