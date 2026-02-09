@@ -195,6 +195,12 @@ def init_state():
                 "itinerary_edits": {},
                 "poi_user_exclude_ids": set(),  # ✅ now exclude by osm_id
             },
+            "hotel": {
+                "stars": [3, 4],
+                "max_price_per_night": 0,
+                "limit": 3,
+                "reorder_by_hotel": True,
+            },
         }
 
 
@@ -218,6 +224,77 @@ def sset(path: str, value):
 # =========================
 # Helpers
 # =========================
+# =========================
+# Hotel Helpers
+# =========================
+
+def compute_itinerary_center(poi_daymap):
+    pois = [p for day in poi_daymap.values() for p in day]
+    if not pois:
+        return None
+    lat = sum(p["lat"] for p in pois) / len(pois)
+    lon = sum(p["lon"] for p in pois) / len(pois)
+    return lat, lon
+
+
+def fetch_hotels_mock(center_lat, center_lon, stars, max_price, limit):
+    base_prices = {1: 60000, 2: 90000, 3: 130000, 4: 190000, 5: 320000}
+    hotels = []
+
+    for i, s in enumerate(stars or [3, 4]):
+        price = base_prices.get(s, 150000)
+        if max_price and price > max_price:
+            continue
+        hotels.append(
+            {
+                "name": f"추천 호텔 {i+1} ({s}성)",
+                "lat": center_lat + 0.002 * (i + 1),
+                "lon": center_lon - 0.002 * (i + 1),
+                "stars": s,
+                "price": price,
+                "amenities": ["wifi", "parking"] if s >= 3 else ["wifi"],
+            }
+        )
+    return hotels[:limit]
+
+
+def score_hotel(hotel, center_lat, center_lon, styles, max_price):
+    score = 0.0
+    dist = haversine_km(center_lat, center_lon, hotel["lat"], hotel["lon"])
+    score += max(0.0, 3.5 - dist) * 0.7
+    score += hotel.get("stars", 3) * 0.25
+
+    if max_price and hotel.get("price"):
+        score += 0.6 if hotel["price"] <= max_price else -0.8
+
+    if "힐링" in styles and hotel.get("stars", 3) >= 4:
+        score += 0.6
+    if "로드트립" in styles and "parking" in hotel.get("amenities", []):
+        score += 0.4
+
+    return round(score, 3)
+
+
+def recommend_hotels(poi_daymap, styles, hotel_opts):
+    center = compute_itinerary_center(poi_daymap)
+    if not center:
+        return []
+
+    lat, lon = center
+    hotels = fetch_hotels_mock(
+        lat,
+        lon,
+        hotel_opts.get("stars", []),
+        hotel_opts.get("max_price_per_night"),
+        hotel_opts.get("limit", 3),
+    )
+
+    scored = []
+    for h in hotels:
+        s = score_hotel(h, lat, lon, styles, hotel_opts.get("max_price_per_night"))
+        scored.append({**h, "score": s})
+
+    return sorted(scored, key=lambda x: x["score"], reverse=True)
 def month_hint(month: str) -> str:
     if month == "상관없음":
         return "월이 프리면, 날씨는 그때그때 ‘유연한 인간’ 모드로 대응 ㄱㄱ"
@@ -1507,7 +1584,36 @@ def render_sidebar():
     sset("ui.show_budget", st.sidebar.toggle("예산 분배 표시", value=bool(sget("ui.show_budget", True))))
     sset("ui.show_checklist", st.sidebar.toggle("체크리스트 표시", value=bool(sget("ui.show_checklist", True))))
     sset("ui.debug_panel", st.sidebar.toggle("디버그 패널", value=bool(sget("ui.debug_panel", False))))
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🏨 숙소 추천 옵션")
 
+    sset(
+        "hotel.stars",
+        st.sidebar.multiselect(
+            "호텔 성급",
+            [1, 2, 3, 4, 5],
+            default=sget("hotel.stars", [3, 4]),
+            format_func=lambda x: f"{x}성",
+        ),
+    )
+
+    sset(
+        "hotel.max_price_per_night",
+        st.sidebar.number_input(
+            "1박 최대 금액(원)",
+            0, 3000000,
+            value=sget("hotel.max_price_per_night", 0),
+            step=50000,
+        ),
+    )
+
+    sset(
+        "hotel.reorder_by_hotel",
+        st.sidebar.toggle(
+            "숙소 기준으로 일정 재정렬",
+            value=bool(sget("hotel.reorder_by_hotel", True)),
+        ),
+    )
 
 def page1():
     st.markdown(
@@ -1717,6 +1823,37 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         move_mode_setting=move_mode_setting,
         return_to_center=bool(sget("ui.include_return_to_center")),
     )
+    # ===== Hotel Recommendation =====
+    hotel_opts = sget("hotel")
+    hotels = recommend_hotels(
+        poi_daymap=poi_daymap,
+        styles=styles,
+        hotel_opts=hotel_opts,
+    )
+
+    selected_hotel = hotels[0] if hotels else None
+
+    if selected_hotel and hotel_opts.get("reorder_by_hotel"):
+        poi_daymap = {
+            d: sorted(
+                ps,
+                key=lambda p: haversine_km(
+                    selected_hotel["lat"],
+                    selected_hotel["lon"],
+                    p["lat"],
+                    p["lon"],
+                ),
+            )
+            for d, ps in poi_daymap.items()
+        }
+
+        day_travel_times = build_day_travel_times(
+            poi_daymap,
+            styles=styles,
+            radius_km=float(sget("ui.poi_radius_km")),
+            move_mode_setting=move_mode_setting,
+            return_to_center=bool(sget("ui.include_return_to_center")),
+        )
     mode_used = None
     if day_travel_times:
         mode_used = day_travel_times.get(1, {}).get("mode") or None
@@ -1765,6 +1902,8 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         "move_mode_used": mode_used
         or (infer_move_mode(styles, float(sget("ui.poi_radius_km"))) if move_mode_setting == "자동" else move_mode_setting),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "hotel_recommendations": hotels,
+        "selected_hotel": selected_hotel,
         "overpass_error": overpass_err,
     }
 
@@ -1856,7 +1995,7 @@ def page3():
             st.write(f"  - {d['date']}: {d['tmin']}~{d['tmax']}°C, 강수 {d['prcp']}mm")
     st.markdown("</div>", unsafe_allow_html=True)
 
-    tab_plan, tab_move, tab_poi, tab_budget, tab_check, tab_export = st.tabs(
+    tab_plan, tab_move, tab_poi, tab_hotel, tab_budget, tab_check, tab_export = st.tabs(
         ["🧾 플랜", "⏱️ 이동시간", "🗺️ 지도+POI", "💸 예산", "✅ 체크리스트", "📤 내보내기"]
     )
 
@@ -2037,7 +2176,23 @@ def page3():
         if st.button("POI 제외 반영 + 일정/이동시간 재최적화 🔄", use_container_width=True):
             sset("cache.last_payload_sig", None)
             st.rerun()
+            
+    with tab_hotel:
+        st.markdown('<div class="tm-section-title">🏨 추천 숙소</div>', unsafe_allow_html=True)
+        hotels = meta.get("hotel_recommendations", [])
 
+        if not hotels:
+            st.info("추천된 숙소가 없어요.")
+        else:
+            for i, h in enumerate(hotels, 1):
+                st.markdown(
+                    f"""
+                    **{i}. {h['name']} ({h['stars']}성)**  
+                    - 1박 예상: {h['price']:,}원  
+                    - 추천 점수: {h['score']}  
+                    """
+                )
+                
     with tab_budget:
         if sget("ui.show_budget", True):
             alloc = allocate_budget(int(payload["budget"]), payload.get("travel_mode", "자유여행"), styles)
@@ -2158,6 +2313,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
