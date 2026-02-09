@@ -2036,6 +2036,7 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
         poi_daymap=poi_daymap,
         styles=styles,
         hotel_opts=hotel_opts,
+        payload=payload,   # 🔥 이 한 줄이 핵심
     )
 
     selected_hotel = hotels[0] if hotels else None
@@ -2520,6 +2521,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
