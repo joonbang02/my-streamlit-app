@@ -22,6 +22,23 @@ logger = logging.getLogger("travel-maker")
 # =========================
 # External APIs
 # =========================
+AMADEUS_BASE_URL = "https://test.api.amadeus.com"
+@st.cache_data(show_spinner=False, ttl=1800)
+def get_amadeus_token(client_id: str, client_secret: str) -> str:
+    if not client_id or not client_secret:
+        raise ApiError("Amadeus API 키가 비어 있어요.")
+
+    url = f"{AMADEUS_BASE_URL}/v1/security/oauth2/token"
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": client_id,
+        "client_secret": client_secret,
+    }
+
+    r = requests.post(url, data=data, timeout=10)
+    r.raise_for_status()
+    return r.json()["access_token"]
+
 OVERPASS_URLS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
@@ -186,6 +203,10 @@ def init_state():
                 "poi_limit": 50,
                 "poi_types": ["관광", "맛집", "카페", "자연", "문화"],
                 "debug_panel": False,
+                "openai_api_key": "",
+                "amadeus_client_id": "",
+                "amadeus_client_secret": "",
+                "use_amadeus_hotel": False,
             },
             "cache": {
                 "last_payload_sig": None,
@@ -227,6 +248,75 @@ def sset(path: str, value):
 # =========================
 # Hotel Helpers
 # =========================
+def amadeus_hotels_by_geocode(lat, lon, token, radius_km=5):
+    url = f"{AMADEUS_BASE_URL}/v1/reference-data/locations/hotels/by-geocode"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "radius": radius_km,
+        "radiusUnit": "KM",
+        "hotelSource": "ALL",
+    }
+
+    r = requests.get(url, headers=headers, params=params, timeout=12)
+    r.raise_for_status()
+    return r.json().get("data", [])
+    
+def amadeus_hotel_offers(hotel_ids, token, checkin, checkout, adults):
+    url = f"{AMADEUS_BASE_URL}/v3/shopping/hotel-offers"
+    headers = {"Authorization": f"Bearer {token}"}
+    params = {
+        "hotelIds": ",".join(hotel_ids),
+        "checkInDate": checkin,
+        "checkOutDate": checkout,
+        "adults": adults,
+        "currency": "KRW",
+    }
+
+    r = requests.get(url, headers=headers, params=params, timeout=15)
+    r.raise_for_status()
+    return r.json().get("data", [])
+    
+def fetch_hotels_amadeus(center_lat, center_lon, payload, hotel_opts):
+    token = get_amadeus_token(
+        sget("ui.amadeus_client_id"),
+        sget("ui.amadeus_client_secret"),
+    )
+
+    nights = duration_to_days(payload["duration"])
+    checkin = payload["start_date"]
+    checkout = (date.fromisoformat(checkin) + timedelta(days=nights)).isoformat()
+
+    hotels_raw = amadeus_hotels_by_geocode(center_lat, center_lon, token)
+    hotel_ids = [h["hotelId"] for h in hotels_raw[:20]]
+
+    offers = amadeus_hotel_offers(
+        hotel_ids,
+        token,
+        checkin,
+        checkout,
+        payload["party_count"],
+    )
+
+    normalized = []
+    for h in offers:
+        hotel = h.get("hotel", {})
+        offer = h.get("offers", [{}])[0]
+
+        total_price = int(float(offer.get("price", {}).get("total", 0)))
+
+        normalized.append({
+            "name": hotel.get("name", "Hotel"),
+            "lat": hotel.get("geoCode", {}).get("latitude"),
+            "lon": hotel.get("geoCode", {}).get("longitude"),
+            "stars": int(hotel.get("rating", 3)),
+            "price": int(total_price / max(1, nights)),  # 1박 가격
+            "amenities": [],
+            "source": "amadeus",
+        })
+
+    return normalized
 
 def compute_itinerary_center(poi_daymap):
     pois = [p for day in poi_daymap.values() for p in day]
@@ -274,8 +364,44 @@ def score_hotel(hotel, center_lat, center_lon, styles, max_price):
 
     return round(score, 3)
 
+def recommend_hotels(poi_daymap, styles, hotel_opts, payload=None):
+    center = compute_itinerary_center(poi_daymap)
+    if not center:
+        return []
 
-def recommend_hotels(poi_daymap, styles, hotel_opts):
+    lat, lon = center
+
+    use_amadeus = bool(sget("ui.use_amadeus_hotel"))
+    hotels = []
+
+    try:
+        if use_amadeus and payload:
+            hotels = fetch_hotels_amadeus(lat, lon, payload, hotel_opts)
+        else:
+            hotels = fetch_hotels_mock(
+                lat,
+                lon,
+                hotel_opts.get("stars", []),
+                hotel_opts.get("max_price_per_night"),
+                hotel_opts.get("limit", 3),
+            )
+    except Exception as e:
+        logger.warning("Amadeus 실패 → mock fallback: %s", e)
+        hotels = fetch_hotels_mock(
+            lat,
+            lon,
+            hotel_opts.get("stars", []),
+            hotel_opts.get("max_price_per_night"),
+            hotel_opts.get("limit", 3),
+        )
+
+    scored = []
+    for h in hotels:
+        s = score_hotel(h, lat, lon, styles, hotel_opts.get("max_price_per_night"))
+        scored.append({**h, "score": s})
+
+    return sorted(scored, key=lambda x: x["score"], reverse=True)
+
     center = compute_itinerary_center(poi_daymap)
     if not center:
         return []
@@ -1531,6 +1657,40 @@ def render_sidebar():
     )
 
     st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🏨 Amadeus API (숙소 실제 데이터)")
+
+    sset(
+        "ui.amadeus_client_id",
+        st.sidebar.text_input(
+            "AMADEUS CLIENT ID",
+            type="password",
+            placeholder="Amadeus Client ID",
+            value=sget("ui.amadeus_client_id", ""),
+        ),
+    )
+
+    sset(
+        "ui.amadeus_client_secret",
+        st.sidebar.text_input(
+            "AMADEUS CLIENT SECRET",
+            type="password",
+            placeholder="Amadeus Client Secret",
+            value=sget("ui.amadeus_client_secret", ""),
+        ),
+    )
+
+    sset(
+        "ui.use_amadeus_hotel",
+        st.sidebar.toggle(
+            "실제 숙소 데이터 사용 (Amadeus)",
+            value=bool(sget("ui.use_amadeus_hotel", False)),
+        ),
+    )
+
+    st.sidebar.caption("※ 키는 세션 메모리에만 저장되며 서버에 기록되지 않습니다.")
+
+
+    st.sidebar.markdown("---")
     st.sidebar.markdown("### 🧳 출발지(거리 계산용)")
     sset("input.start_city", st.sidebar.text_input("출발 도시", value=sget("input.start_city", "서울")))
 
@@ -2313,6 +2473,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
