@@ -695,7 +695,7 @@ def build_itinerary_from_pois(
     elif radius_km <= 8:
         per_day = 5
     else:
-    per_day = 4
+        per_day = 4
     max_pick = max(6, min(len(scored), days * per_day))
     picked = [p for _, p in scored[:max_pick]]
 
@@ -2155,6 +2155,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
