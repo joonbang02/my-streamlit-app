@@ -1707,7 +1707,7 @@ def generate_bundle() -> Tuple[Dict[str, Any], Optional[str]]:
 
     exclude_ids = set(sget("runtime.poi_user_exclude_ids") or set())
     styles = payload.get("travel_style", [])
-    poi_daymap = build_itinerary_from_pois(pois_filtered, styles, days=days, float(sget("ui.poi_radius_km")), exclude_ids=exclude_ids)
+    poi_daymap = build_itinerary_from_pois(pois_filtered, styles, days=days, radius_km=float(sget("ui.poi_radius_km")), exclude_ids=exclude_ids)
 
     move_mode_setting = sget("ui.move_mode")
     day_travel_times = build_day_travel_times(
@@ -2158,6 +2158,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
