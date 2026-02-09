@@ -735,13 +735,15 @@ def estimate_route_time_minutes(
     points: List[Tuple[float, float]],
     mode: str,
     return_to_center: bool = True,
-    radius_km: float = 8.0,
+    radius_km: float = 8.0,    
 ) -> Dict[str, Any]:
     """
     ✅ Improved realism:
     - Short leg => less overhead
     - Dense area => slightly slower effective speed
     """
+    stay_min = 0  # ✅ 추가: 모든 경로에서 stay_min이 정의되도록 기본값 세팅
+    
     if not points or len(points) == 1:
         stay_min = sum(STAY_MINUTES.get(p_type, 60) for p_type in ["관광"] * len(points))
         day_total = int(round(total_min + stay_min))
@@ -2155,6 +2157,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
