@@ -1374,12 +1374,16 @@ def render_map(dest_geo: Dict[str, Any], pois: List[Dict[str, Any]]):
             data=poi_data,
             get_position=["lon", "lat"],
 
-            radius_units="meters",          # ✅ 추가 (핵심)
-            get_radius=120,                 # ✅ 수정 (기존 2500 ❌)
-            get_fill_color=[80, 140, 200, 180],  # ✅ 추가 (파란색)
+            radius_units="meters",
+            get_radius=120,
 
+            radiusMinPixels=2,     # 🔑 최소 픽셀 크기
+            radiusMaxPixels=12,    # 🔑 최대 픽셀 크기
+
+            get_fill_color=[80, 140, 200, 180],
             pickable=True,
         )
+
     )
 
 
@@ -2114,5 +2118,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
