@@ -460,12 +460,12 @@ def _poi_type(tags: Dict[str, Any]) -> str:
 
 def _poi_quality_score(tags: Dict[str, Any]) -> float:
     """
-    ✅ Simple “quality” heuristics:
-    - wikidata/wikipedia/image present => likely notable POI
-    - name:en not required, but can help
-    - avoid placeholders / generic
+    강화된 POI 품질 휴리스틱:
+    - 실제 방문 가치가 낮은 잡음 POI 제거
     """
     s = 0.0
+
+    # 신뢰 신호
     if tags.get("wikidata"):
         s += 0.35
     if tags.get("wikipedia"):
@@ -473,16 +473,28 @@ def _poi_quality_score(tags: Dict[str, Any]) -> float:
     if tags.get("image"):
         s += 0.2
     if tags.get("website"):
-        s += 0.08
+        s += 0.1
     if tags.get("opening_hours"):
         s += 0.05
     if tags.get("tourism") == "museum":
         s += 0.12
-    # soft penalty for overly generic names
+
+    # ❌ 맛집 잡음 제거
+    if tags.get("amenity") == "restaurant":
+        if not any(tags.get(k) for k in ("opening_hours", "website", "cuisine", "wikidata")):
+            s -= 0.3
+
+    # ❌ 관광지 잡음 제거
+    if tags.get("tourism") == "attraction":
+        if not any(tags.get(k) for k in ("wikidata", "wikipedia", "description")):
+            s -= 0.25
+
+    # ❌ 너무 일반적인 이름
     nm = (tags.get("name") or "").strip().lower()
     if nm in ("park", "cafe", "restaurant") or len(nm) <= 2:
-        s -= 0.15
-    return s
+        s -= 0.2
+
+    return round(s, 3)
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)  # ✅ 1 day
@@ -555,6 +567,11 @@ def fetch_pois_overpass(lat: float, lon: float, radius_km: float, limit: int):
             return deduped[: max(0, int(limit))]
         except Exception:
             continue
+
+    # ❗ Overpass 실패 fallback
+    cached = sget("cache.last_pois")
+    if cached:
+        return cached[: max(0, int(limit))]
 
     return []
 
@@ -673,7 +690,12 @@ def build_itinerary_from_pois(
     scored = [(poi_score(p, styles), p) for p in filtered]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    per_day = 5 if days >= 5 else 6
+    if radius_km <= 4:
+        per_day = 6
+    elif radius_km <= 8:
+        per_day = 5
+    else:
+    per_day = 4
     max_pick = max(6, min(len(scored), days * per_day))
     picked = [p for _, p in scored[:max_pick]]
 
@@ -721,12 +743,18 @@ def estimate_route_time_minutes(
     - Dense area => slightly slower effective speed
     """
     if not points or len(points) == 1:
+        stay_min = sum(STAY_MINUTES.get(p_type, 60) for p_type in ["관광"] * len(points))
+        day_total = int(round(total_min + stay_min))
+
         return {
             "mode": mode,
-            "total_minutes": 0,
-            "total_km": 0.0,
-            "legs": [],
-            "note": "포인트가 1개 이하라 이동시간은 0으로 처리!",
+            "total_minutes": int(round(total_min)),
+            "total_km": round(total_km, 2),
+            "stay_minutes": stay_min,
+            "day_total_minutes": day_total,
+            "overload": day_total > 480,  # 8시간 초과
+            "legs": legs,
+            "note": "이동+체류 합산 추정치(8시간 초과 시 과부하)",
         }
 
     speed = move_speed_kmh(mode)
@@ -1775,7 +1803,13 @@ def page3():
     day_times = meta.get("day_travel_times", {}) or {}
 
     if err:
-        st.warning(f"OpenAI 쪽은 실패했지만, 플랜은 POI 최적화 룰베이스로 완주했어 🛟\n\n사유: {err}")
+        msg = str(err).lower()
+        if "quota" in msg or "rate" in msg:
+            st.warning("🤖 AI 사용량 초과 → 오늘은 자동 플랜 모드로 진행했어요.")
+        elif "api key" in msg:
+            st.info("🔑 OpenAI 키가 없어서 자동 플랜으로 생성했어요.")
+        else:
+            st.warning(f"🤖 AI 응답이 불안정해서 자동 플랜으로 전환했어요.\n\n사유: {err}")
 
     if meta.get("overpass_error"):
         st.info(f"POI 수집이 불안정했을 수 있어요(Overpass). 필요하면 반경/개수를 줄이거나 다시 시도해줘.\n\n사유: {meta['overpass_error']}")
@@ -2121,6 +2155,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
