@@ -245,6 +245,15 @@ def sset(path: str, value):
 # =========================
 # Helpers
 # =========================
+STAY_MINUTES = {
+    "관광": 90,
+    "문화": 90,
+    "자연": 75,
+    "맛집": 60,
+    "카페": 45,
+    "유흥": 120,
+    "편의": 20,
+}
 # =========================
 # Hotel Helpers
 # =========================
@@ -949,7 +958,7 @@ def estimate_route_time_minutes(
     stay_min = 0  # ✅ 추가: 모든 경로에서 stay_min이 정의되도록 기본값 세팅
     
     if not points or len(points) == 1:
-        stay_min = sum(STAY_MINUTES.get(p_type, 60) for p_type in ["관광"] * len(points))
+        stay_min = 60 * len(points)  # POI 1곳 평균 체류시간 70분
         day_total = int(round(total_min + stay_min))
 
         return {
@@ -2473,6 +2482,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
