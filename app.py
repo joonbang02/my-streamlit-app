@@ -298,7 +298,20 @@ def fetch_hotels_amadeus(center_lat, center_lon, payload, hotel_opts):
     checkout = (date.fromisoformat(checkin) + timedelta(days=nights)).isoformat()
 
     hotels_raw = amadeus_hotels_by_geocode(center_lat, center_lon, token)
-    hotel_ids = [h["hotelId"] for h in hotels_raw[:20]]
+
+    hotel_map = {
+        h["hotelId"]: {
+            "name": h.get("name"),
+            "lat": h.get("geoCode", {}).get("latitude"),
+            "lon": h.get("geoCode", {}).get("longitude"),
+            "stars": int(h.get("rating", 3)),
+        }
+        for h in hotels_raw
+        if h.get("hotelId")
+    }
+
+    hotel_ids = list(hotel_map.keys())[:20]
+
 
     offers = amadeus_hotel_offers(
         hotel_ids,
@@ -310,17 +323,15 @@ def fetch_hotels_amadeus(center_lat, center_lon, payload, hotel_opts):
 
     normalized = []
     for h in offers:
-        hotel = h.get("hotel", {})
-        offer = h.get("offers", [{}])[0]
-
-        total_price = int(float(offer.get("price", {}).get("total", 0)))
+        hid = h.get("hotel", {}).get("hotelId")
+        base = hotel_map.get(hid, {})
 
         normalized.append({
-            "name": hotel.get("name", "Hotel"),
-            "lat": hotel.get("geoCode", {}).get("latitude"),
-            "lon": hotel.get("geoCode", {}).get("longitude"),
-            "stars": int(hotel.get("rating", 3)),
-            "price": int(total_price / max(1, nights)),  # 1박 가격
+            "name": base.get("name") or "이름 없는 호텔",
+            "lat": base.get("lat"),
+            "lon": base.get("lon"),
+            "stars": base.get("stars", 3),
+            "price": int(total_price / max(1, nights)),
             "amenities": [],
             "source": "amadeus",
         })
@@ -2495,6 +2506,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
