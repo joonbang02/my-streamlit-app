@@ -297,22 +297,28 @@ def fetch_hotels_amadeus(center_lat, center_lon, payload, hotel_opts):
     checkin = payload["start_date"]
     checkout = (date.fromisoformat(checkin) + timedelta(days=nights)).isoformat()
 
+    # 1️⃣ 기준 데이터: by-geocode
     hotels_raw = amadeus_hotels_by_geocode(center_lat, center_lon, token)
 
-    hotel_map = {
-        h["hotelId"]: {
-            "name": h.get("name"),
+    if not hotels_raw:
+        return []
+
+    base_hotels = {}
+    for h in hotels_raw:
+        hid = h.get("hotelId")
+        if not hid:
+            continue
+
+        base_hotels[hid] = {
+            "name": h.get("name") or "이름 없는 호텔",
             "lat": h.get("geoCode", {}).get("latitude"),
             "lon": h.get("geoCode", {}).get("longitude"),
-            "stars": int(h.get("rating", 3)),
+            "stars": int(h.get("rating", 3)) if str(h.get("rating", "")).isdigit() else 3,
         }
-        for h in hotels_raw
-        if h.get("hotelId")
-    }
 
-    hotel_ids = list(hotel_map.keys())[:20]
+    hotel_ids = list(base_hotels.keys())[:20]
 
-
+    # 2️⃣ 가격 데이터: offers
     offers = amadeus_hotel_offers(
         hotel_ids,
         token,
@@ -321,16 +327,24 @@ def fetch_hotels_amadeus(center_lat, center_lon, payload, hotel_opts):
         payload["party_count"],
     )
 
+    # 3️⃣ 최종 정규화 (이름은 base_hotels에서만 가져옴)
     normalized = []
-    for h in offers:
-        hid = h.get("hotel", {}).get("hotelId")
-        base = hotel_map.get(hid, {})
+
+    for o in offers:
+        hid = o.get("hotel", {}).get("hotelId")
+        base = base_hotels.get(hid)
+
+        if not base:
+            continue
+
+        offer = o.get("offers", [{}])[0]
+        total_price = int(float(offer.get("price", {}).get("total", 0)))
 
         normalized.append({
-            "name": base.get("name") or "이름 없는 호텔",
-            "lat": base.get("lat"),
-            "lon": base.get("lon"),
-            "stars": base.get("stars", 3),
+            "name": base["name"],
+            "lat": base["lat"],
+            "lon": base["lon"],
+            "stars": base["stars"],
             "price": int(total_price / max(1, nights)),
             "amenities": [],
             "source": "amadeus",
@@ -2506,6 +2520,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
 
